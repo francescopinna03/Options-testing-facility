@@ -614,39 +614,40 @@ def calibrate_sfv(ticker, maturity, r, q=0.0, method='differential_evolution', n
     bounds = [(0.1, 10), (1e-3, 1), (1e-3, 1), (1e-3, 2), (-3.5, 3.5), (0.0, 5.0), (0.01, 0.99), (1.05, 10.0), (0.05, 10.0), (0.0, 5.0), (-1.0, 1.0), (1e-3, 1.0), (-0.95, 0.95)]
     if N_step is None:
         N_step = max(10, int(np.ceil(Ttm * 252 / 2)))
-    M_coarse = 6000 if Ttm <= 30/365 else 9000
-    M_fine = 12000 if Ttm <= 30/365 else 16000
+    M_coarse = 4000 if Ttm <= 30/365 else 6000
+    M_fine = 16000 if Ttm <= 30/365 else 22000
     if dev:
-        M_coarse = max(4000, int(0.7 * M_coarse))
-        M_fine = max(8000, int(0.8 * M_fine))
+        M_coarse = max(3000, int(0.7 * M_coarse))
+        M_fine = max(10000, int(0.8 * M_fine))
     rec_coarse = ObjectiveRecorder(obj_sfv)
     rec_fine = ObjectiveRecorder(obj_sfv)
     reg_coarse = {'w_gamma': 0.01, 'w_lambdaS': 0.01, 'w_lambdaV': 0.01}
     reg_fine = {'w_gamma': 0.01, 'w_lambdaS': 0.01, 'w_lambdaV': 0.01}
     args_coarse = (S, r, q, Ttm, strikes, market_prices, iv_mkt, w_pre, liq_weights, (1e-6, 3.0), N_step, M_coarse, 1.0, None, reg_coarse, 0.0, 0.05, 30, 1e-3, 0.05, 100.0, 0.5,'weight')
     args_fine = (S, r, q, Ttm, strikes, market_prices, iv_mkt, w_pre, liq_weights, (1e-6, 3.0), N_step, M_fine, 1.0, None, reg_fine, 0.0, 0.05, 30, 1e-3, 0.05, 150.0, 0.5, 'weight')
-    it_de = {"k": 0}
     best_de_obj = float('inf')
-    it_de = {"k": 0, "last_time": time.time()}
+    it_de = {"k": 0}
+    _de_maxiter = 30 if dev else 45
     def _cb_de(xk, conv):
         nonlocal best_de_obj
         it_de["k"] += 1
-        now = time.time()
-        if rec_coarse.last_f is not None and rec_coarse.last_f < best_de_obj:
-            best_de_obj = rec_coarse.last_f
-            if dev and dev_logger and (it_de["k"] % 3 == 0 or now - it_de["last_time"] > 10):
-                dev_logger.write(f"[SFV-OPT] DE step {it_de['k']}: f={rec_coarse.last_f:.6g}")
-                it_de["last_time"] = now
+        if rec_coarse.last_f is not None:
+            improved = rec_coarse.last_f < best_de_obj
+            if improved:
+                best_de_obj = rec_coarse.last_f
+            if dev and dev_logger:
+                tag = " *" if improved else ""
+                dev_logger.write(f"[SFV-OPT] DE step {it_de['k']}/{_de_maxiter}: f={rec_coarse.last_f:.6g}{tag}")
         return False
     crn_map = CRNMap(base_seed=42)
-    de_res = differential_evolution(rec_coarse, bounds, args=args_coarse, maxiter=(40 if dev else 60), popsize=(12 if dev else 18), mutation=(0.6, 1.0), recombination=0.9, polish=False, disp=False, callback=_cb_de, updating='deferred', workers=crn_map, seed=42)
+    de_res = differential_evolution(rec_coarse, bounds, args=args_coarse, maxiter=_de_maxiter, popsize=(10 if dev else 14), mutation=(0.5, 1.2), recombination=0.85, polish=False, disp=False, callback=_cb_de, updating='deferred', workers=crn_map, seed=42, tol=5e-4, init='sobol')
     x_start = np.array(de_res.x, dtype=float)
     it_lbfgs = {"k": 0}
     def _cb_lbfgs(xk):
         it_lbfgs["k"] += 1
         if dev and dev_logger is not None and rec_fine.last_f is not None:
             dev_logger.write(f"[SFV] L-BFGS-B iter {it_lbfgs['k']}: f(x)= {rec_fine.last_f:.6g}")
-    lbfgs_opts = {'maxiter': 120, 'disp': False, 'maxls': 60, 'ftol': 1e-6, 'gtol': 1e-5, 'eps': 1e-8}
+    lbfgs_opts = {'maxiter': 150, 'disp': False, 'maxls': 80, 'ftol': 1e-9, 'gtol': 1e-7, 'eps': 5e-9}
     res_lbfgs = minimize(rec_fine, x0=x_start, args=args_fine, bounds=bounds, method='L-BFGS-B', options=lbfgs_opts, callback=_cb_lbfgs)
     if not (res_lbfgs.success and np.all(np.isfinite(res_lbfgs.x))):
         if dev and dev_logger is not None:
@@ -656,7 +657,7 @@ def calibrate_sfv(ticker, maturity, r, q=0.0, method='differential_evolution', n
             it_pow["k"] += 1
             if dev and dev_logger is not None and rec_fine.last_f is not None:
                 dev_logger.write(f"[SFV] Powell iter {it_pow['k']}: f(x)= {rec_fine.last_f:.6g}")
-        res_pow = minimize(rec_fine, x0=x_start, args=args_fine, bounds=bounds, method='Powell', options={'maxiter': 200, 'disp': False}, callback=_cb_powell)
+        res_pow = minimize(rec_fine, x0=x_start, args=args_fine, bounds=bounds, method='Powell', options={'maxiter': 250, 'ftol': 1e-9, 'disp': False}, callback=_cb_powell)
         def _val(x):
             return float(rec_fine(np.array(x, dtype=float), *args_fine))
         candidates = []
@@ -818,13 +819,14 @@ def calibrate_sfv_multi_expiry(datasets, S0, r, q, dev=False, dev_logger=None):
     rec_coarse = ObjectiveRecorder(lambda x: _obj_sfv_multi(x, datasets, S0, r, q, alpha=1.0, seed=777))
     rec_fine = ObjectiveRecorder(lambda x: _obj_sfv_multi(x, datasets, S0, r, q, alpha=1.0, seed=1234))
     it_de = {'k': 0}
+    _de_maxiter_oos = 25 if dev else 40
     def _cb_de(xk, conv):
         it_de['k'] += 1
         if dev and dev_logger is not None and rec_coarse.last_f is not None:
-            dev_logger.write(f"[SFV-OOS] DE step {it_de['k']}: f(x)= {rec_coarse.last_f:.6g}")
+            dev_logger.write(f"[SFV-OOS] DE step {it_de['k']}/{_de_maxiter_oos}: f(x)= {rec_coarse.last_f:.6g}")
         return False
-    crn_map = CRNMap(base_seed=777) 
-    de_res = differential_evolution(rec_coarse, bounds, maxiter=(30 if dev else 50), popsize=(10 if dev else 16), mutation=(0.6, 1.0), recombination=0.9, polish=False, disp=False, callback=_cb_de, updating='deferred', workers=crn_map, seed=777)
+    crn_map = CRNMap(base_seed=777)
+    de_res = differential_evolution(rec_coarse, bounds, maxiter=_de_maxiter_oos, popsize=(8 if dev else 12), mutation=(0.5, 1.2), recombination=0.85, polish=False, disp=False, callback=_cb_de, updating='deferred', workers=crn_map, seed=777, tol=5e-4, init='sobol')
     x_start = np.array(de_res.x, dtype=float)
     it_lb = {'k': 0}
     def _cb_lb(xk):
@@ -833,12 +835,12 @@ def calibrate_sfv_multi_expiry(datasets, S0, r, q, dev=False, dev_logger=None):
             dev_logger.write(f"[SFV-OOS] LBFGS iter {it_lb['k']}: f(x)= {rec_fine.last_f:.6g}")
     res_lb = minimize(
         rec_fine, x0=x_start, bounds=bounds, method='L-BFGS-B',
-        options={'maxiter': 100, 'disp': False, 'maxls': 50, 'ftol': 1e-6, 'gtol': 1e-5, 'eps': 1e-8}, callback=_cb_lb)
+        options={'maxiter': 130, 'disp': False, 'maxls': 70, 'ftol': 1e-9, 'gtol': 1e-7, 'eps': 5e-9}, callback=_cb_lb)
     if not (res_lb.success and np.all(np.isfinite(res_lb.x))):
         if dev and dev_logger is not None:
             dev_logger.write(f"[SFV-OOS] LBFGS fallito ({getattr(res_lb, 'message','n/a')}). Powell…")
         res_pw = minimize(
-            rec_fine, x0=x_start, bounds=bounds, method='Powell', options={'maxiter': 160, 'disp': False})
+            rec_fine, x0=x_start, bounds=bounds, method='Powell', options={'maxiter': 200, 'ftol': 1e-9, 'disp': False})
         def _val(x):
             return float(rec_fine(np.array(x, dtype=float)))
         candidates = []
