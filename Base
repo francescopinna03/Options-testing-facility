@@ -963,11 +963,29 @@ def rmse_from(df, col):
     return float(np.sqrt(colser.mean())) if colser.notna().any() else np.nan
 
 def style_with_blue(df, caption_text):
-    blue_header = [{'selector': 'thead th', 'props': [('background-color', '#1f497d'), ('color', 'white')]}]
-    blue_rows = [{'selector': 'tbody tr:nth-child(odd)',  'props': [('background-color', '#e8f1fb')]}, {'selector': 'tbody tr:nth-child(even)', 'props': [('background-color', '#dbe9f7')]}]
+    dark_header = [
+        {'selector': 'thead th', 'props': [('background-color', '#1a2744'), ('color', '#3b82f6'),
+         ('font-size', '11px'), ('text-transform', 'uppercase'), ('letter-spacing', '0.5px'),
+         ('font-weight', '600'), ('border-bottom', '2px solid #3b82f6'), ('padding', '8px 10px')]},
+    ]
+    dark_rows = [
+        {'selector': 'tbody tr:nth-child(odd)', 'props': [('background-color', '#151d2e'), ('color', '#e2e8f0')]},
+        {'selector': 'tbody tr:nth-child(even)', 'props': [('background-color', '#1a2438'), ('color', '#e2e8f0')]},
+        {'selector': 'tbody td', 'props': [('border-bottom', '1px solid #1e293b'), ('padding', '6px 10px'),
+         ('font-family', 'JetBrains Mono, monospace'), ('font-size', '12px')]},
+        {'selector': 'tbody tr:hover', 'props': [('background-color', '#1e3a5f')]},
+        {'selector': 'caption', 'props': [('caption-side', 'top'), ('text-align', 'left'),
+         ('font-size', '11px'), ('font-weight', '600'), ('color', '#64748b'),
+         ('text-transform', 'uppercase'), ('letter-spacing', '0.5px'),
+         ('padding', '8px 10px'), ('background', '#111827'), ('border', '1px solid #1e293b'),
+         ('border-bottom', 'none'), ('border-radius', '6px 6px 0 0')]},
+        {'selector': '', 'props': [('border', '1px solid #1e293b'), ('border-collapse', 'collapse')]},
+    ]
     fmt_cols = {'K':'{:.2f}','T':'{:.3f}','Market':'{:.2f}','Heston':'{:.2f}','SFV':'{:.2f}','BS':'{:.2f}','CRR':'{:.2f}','MC_BS':'{:.2f}','IV':'{:.3f}','SQError_Heston':'{:.4f}','SQError_SFV':'{:.4f}','SQError_BS':'{:.4f}','SQError_CRR':'{:.4f}','SQError_MC_BS':'{:.4f}'}
     err_cols = ['SQError_Heston','SQError_SFV','SQError_BS','SQError_CRR','SQError_MC_BS']
-    styled = (df.style.format(fmt_cols).set_caption(caption_text).set_table_styles(blue_header + blue_rows).background_gradient(axis=None, subset=err_cols, cmap='Blues'))
+    styled = (df.style.format(fmt_cols).set_caption(caption_text)
+              .set_table_styles(dark_header + dark_rows)
+              .background_gradient(axis=None, subset=err_cols, cmap='YlOrRd', vmin=0))
     return styled
 
 def plot_prices_3d(df_plot, ticker_str, subset_label, opt_type=None):
@@ -977,11 +995,23 @@ def plot_prices_3d(df_plot, ticker_str, subset_label, opt_type=None):
         except NameError:
             opt_type = 'Call'
     fig = go.Figure()
-    fig.add_trace(go.Scatter3d(x=df_plot['K'], y=df_plot['T'], z=df_plot['Market'], mode='markers', name='Mercato', marker=dict(size=3, opacity=0.9)))
+    fig.add_trace(go.Scatter3d(x=df_plot['K'], y=df_plot['T'], z=df_plot['Market'], mode='markers', name='Market',
+        marker=dict(size=4, color='#f8fafc', opacity=0.95, line=dict(width=1, color='#3b82f6'))))
+    model_colors = {'Heston':'#3b82f6', 'SFV':'#10b981', 'BS':'#f59e0b', 'CRR':'#8b5cf6', 'MC_BS':'#06b6d4'}
     for name, size in [('Heston',3), ('SFV',3), ('BS',2), ('CRR',2), ('MC_BS',2)]:
         if name in df_plot.columns and df_plot[name].notna().any():
-            fig.add_trace(go.Scatter3d(x=df_plot['K'], y=df_plot['T'], z=df_plot[name], mode='markers', name=name, marker=dict(size=size, opacity=0.7)))
-    fig.update_layout(title=f'Prezzi Call {ticker_str}: Mercato vs Modelli ({subset_label})', scene=dict(xaxis_title='Strike', yaxis_title='T (anni)', zaxis_title='Prezzo'), height=700, margin=dict(l=10,r=10,b=10,t=50), legend=dict(orientation='h', yanchor='bottom', y=0.02, xanchor='right', x=1))
+            fig.add_trace(go.Scatter3d(x=df_plot['K'], y=df_plot['T'], z=df_plot[name], mode='markers', name=name,
+                marker=dict(size=size, color=model_colors.get(name, '#94a3b8'), opacity=0.8)))
+    fig.update_layout(
+        title=dict(text=f'{opt_type} Prices — {ticker_str} ({subset_label})', x=0.0, xanchor='left'),
+        scene=dict(
+            xaxis_title='Strike', yaxis_title='T (years)', zaxis_title='Price',
+            bgcolor='#0a0e17',
+            xaxis=dict(backgroundcolor='#111827', gridcolor='#1e293b', showbackground=True),
+            yaxis=dict(backgroundcolor='#111827', gridcolor='#1e293b', showbackground=True),
+            zaxis=dict(backgroundcolor='#111827', gridcolor='#1e293b', showbackground=True)),
+        height=650, margin=dict(l=0, r=0, b=0, t=40),
+        legend=dict(orientation='h', yanchor='bottom', y=0.02, xanchor='right', x=1))
     fig.show()
 
 def bs_implied_vol_from_price(price, S0, K, T, r, q, option_type='call', tol=1e-6):
@@ -1209,16 +1239,33 @@ def plot_iv_surface(ticker_api, expirations, today, S0, ticker_str, r=0.0425, su
     IV_surface = np.sqrt(W_surface / TT)
     K_surface = S0 * np.exp(KK + (r - q) * TT)
     fig = go.Figure()
-    fig.add_trace(go.Surface(x=K_surface, y=TT, z=IV_surface, colorscale='Viridis', opacity=0.8, name='IV Surface', colorbar=dict(title="Implied Volatility", x=1.02), lighting=dict(ambient=0.4, diffuse=0.6, fresnel=0.2, specular=0.3), contours=dict(z=dict(show=True, usecolormap=True, project_z=True))))
+    fig.add_trace(go.Surface(x=K_surface, y=TT, z=IV_surface,
+        colorscale=[[0,'#0c4a6e'],[0.25,'#0369a1'],[0.5,'#0ea5e9'],[0.75,'#38bdf8'],[1,'#bae6fd']],
+        opacity=0.85, name='IV Surface',
+        colorbar=dict(title=dict(text="IV", font=dict(size=11)), tickfont=dict(size=10), x=1.02, len=0.6),
+        lighting=dict(ambient=0.5, diffuse=0.5, fresnel=0.15, specular=0.2),
+        contours=dict(z=dict(show=True, usecolormap=True, project_z=True, highlightcolor='#60a5fa'))))
     K_market = df['strike'].values
     T_market = df['T'].values
     IV_market = df['iv_mid'].values
     weights_market = df['weight'].values
-    colors = np.where(df['side'] == 'calls', 'red', 'blue')
-    sizes = 3 + 5 * (weights_market / weights_market.max())
-    fig.add_trace(go.Scatter3d(x=K_market, y=T_market, z=IV_market, mode='markers', marker=dict(size=sizes, color=colors, opacity=0.9, line=dict(width=1, color='black')), name='Market Data', hovertemplate='<b>%{text}</b><br>' + 'Strike: %{x:.2f}<br>' + 'Maturity: %{y:.3f}<br>' + 'IV: %{z:.3f}<br>' + '<extra></extra>', text=[f"{'Call' if side == 'calls' else 'Put'} (w={w:.2f})" for side, w in zip(df['side'], df['weight'])]))
-    fig.update_layout(title=dict(text=f"Implied Volatility Surface — {ticker_str} ({surface_method.upper()})<br>" f"<sub>Quality Score: {quality_score:.2f} | Points: {len(df)} | Method: {surface_method}</sub>", x=0.5, font=dict(size=16)),
-        scene=dict(xaxis_title='Strike Price', yaxis_title='Time to Maturity (years)', zaxis_title='Implied Volatility', camera=dict(eye=dict(x=1.5, y=1.5, z=1.3)), bgcolor='rgba(245,245,245,0.9)', xaxis=dict(showgrid=True, gridcolor='white', gridwidth=1), yaxis=dict(showgrid=True, gridcolor='white', gridwidth=1), zaxis=dict(showgrid=True, gridcolor='white', gridwidth=1)), height=800, margin=dict(l=0, r=100, b=0, t=80))
+    colors = np.where(df['side'] == 'calls', '#10b981', '#f59e0b')
+    sizes = 3 + 4 * (weights_market / weights_market.max())
+    fig.add_trace(go.Scatter3d(x=K_market, y=T_market, z=IV_market, mode='markers',
+        marker=dict(size=sizes, color=colors, opacity=0.9, line=dict(width=0.5, color='#e2e8f0')),
+        name='Market Data',
+        hovertemplate='<b>%{text}</b><br>Strike: %{x:.2f}<br>T: %{y:.3f}<br>IV: %{z:.3f}<extra></extra>',
+        text=[f"{'Call' if side == 'calls' else 'Put'} (w={w:.2f})" for side, w in zip(df['side'], df['weight'])]))
+    fig.update_layout(
+        title=dict(text=f"IV Surface — {ticker_str} | {surface_method.upper()} | Q={quality_score:.2f} | N={len(df)}", x=0.0, xanchor='left'),
+        scene=dict(
+            xaxis_title='Strike', yaxis_title='T (years)', zaxis_title='IV',
+            camera=dict(eye=dict(x=1.5, y=1.5, z=1.2)),
+            bgcolor='#0a0e17',
+            xaxis=dict(backgroundcolor='#111827', gridcolor='#1e293b', showbackground=True),
+            yaxis=dict(backgroundcolor='#111827', gridcolor='#1e293b', showbackground=True),
+            zaxis=dict(backgroundcolor='#111827', gridcolor='#1e293b', showbackground=True)),
+        height=700, margin=dict(l=0, r=80, b=0, t=40))
     residuals = []
     for i, (k_point, T_point, iv_market) in enumerate(zip(df['k'], df['T'], df['iv_mid'])):
         distances = (KK - k_point)**2 + (TT - T_point)**2
@@ -1237,19 +1284,17 @@ def plot_iv_surface(ticker_api, expirations, today, S0, ticker_str, r=0.0425, su
         'n_maturities': df['T'].nunique(),
         'method': surface_method
     }
-    print(f"\n{'='*60}")
-    print(f"IV SURFACE QUALITY — {ticker_str}")
-    print(f"{'='*60}")
-    print(f"Method: {surface_method.upper()}")
-    print(f"Quality Score: {quality_score:.3f}")
-    print(f"MAE: {metrics['mae']:.4f}")
-    print(f"RMSE: {metrics['rmse']:.4f}")
-    print(f"Median Error: {metrics['median_error']:.4f}")
-    print(f"95th %ile Error: {metrics['q95_error']:.4f}")
-    print(f"Max Error: {metrics['max_error']:.4f}")
-    print(f"Data Points: {metrics['n_points']}")
-    print(f"Maturities: {metrics['n_maturities']}")
-    print(f"{'='*60}")
+    print(f"\n{'─'*50}")
+    print(f"  IV SURFACE  {ticker_str}  {surface_method.upper()}")
+    print(f"{'─'*50}")
+    print(f"  Quality   {quality_score:.3f}")
+    print(f"  MAE       {metrics['mae']:.4f}")
+    print(f"  RMSE      {metrics['rmse']:.4f}")
+    print(f"  Median    {metrics['median_error']:.4f}")
+    print(f"  P95       {metrics['q95_error']:.4f}")
+    print(f"  Max       {metrics['max_error']:.4f}")
+    print(f"  Points    {metrics['n_points']}   Maturities  {metrics['n_maturities']}")
+    print(f"{'─'*50}")
     fig.show()
     return {
         'figure': fig,
@@ -1261,108 +1306,343 @@ def plot_iv_surface(ticker_api, expirations, today, S0, ticker_str, r=0.0425, su
 def _install_ui_theme():
     css = """
     <style>
+      @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
       :root{
-        --accent:#2b6cb0;
-        --accent-2:#38a169;
-        --bg:#f6f8fb;
-        --card:#ffffff;
-        --text:#1f2937;
-        --muted:#6b7280;
-        --radius:14px;
-        --shadow:0 8px 24px rgba(0,0,0,.08);
-        --shadow-sm:0 4px 14px rgba(0,0,0,.06);
-        --border:#eef2f7;
+        --bg-primary:   #0a0e17;
+        --bg-secondary: #111827;
+        --bg-card:      #151d2e;
+        --bg-card-alt:  #1a2438;
+        --border:       #1e293b;
+        --border-accent:#2563eb;
+        --accent:       #3b82f6;
+        --accent-hover: #60a5fa;
+        --accent-green: #10b981;
+        --accent-amber: #f59e0b;
+        --accent-red:   #ef4444;
+        --text-primary: #e2e8f0;
+        --text-secondary:#94a3b8;
+        --text-muted:   #64748b;
+        --text-bright:  #f8fafc;
+        --radius:       6px;
+        --radius-lg:    10px;
+        --shadow:       0 4px 24px rgba(0,0,0,.4);
+        --shadow-sm:    0 2px 8px rgba(0,0,0,.3);
+        --font-sans:    'Inter', ui-sans-serif, -apple-system, system-ui, sans-serif;
+        --font-mono:    'JetBrains Mono', ui-monospace, monospace;
       }
-      .app-wrap{background:var(--bg); padding:12px; border-radius:var(--radius);}
-      .card{background:var(--card); border:1px solid var(--border);
-            border-radius:var(--radius); box-shadow:var(--shadow); padding:12px;}
-      .card + .card{margin-top:12px;}
-      .card-title{font-weight:700; color:var(--text); font-size:16px; margin:0 0 8px;}
-      .muted{color:var(--muted); font-size:12px; margin-top:2px;}
-      .widget-button>button{
-        border-radius:12px !important; border:none !important;
-        box-shadow:var(--shadow-sm); padding:6px 12px;
+
+      /* ── app shell ───────────────────────────────── */
+      .app-wrap{
+        background:var(--bg-primary); padding:0; border-radius:var(--radius-lg);
+        font-family:var(--font-sans); color:var(--text-primary);
+        border:1px solid var(--border);
       }
-      .widget-toggle-buttons .widget-toggle-button{
-        border-radius:10px !important; overflow:hidden;
+      .app-header{
+        background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+        border-bottom:1px solid var(--border);
+        padding:14px 20px 10px; display:flex; align-items:center; gap:14px;
       }
-      .badges{display:flex; flex-wrap:wrap; gap:6px; margin-top:4px;}
-      .badge{display:inline-block; padding:4px 10px; border-radius:999px;
-             background:#eef2ff; color:#3730a3; font-weight:600; font-size:12px;}
-      .badge.green{background:#ecfdf5; color:#065f46;}
-      .badge.blue{background:#eff6ff; color:#1e40af;}
-      table.dataframe{border-collapse:collapse; border-radius:12px; overflow:hidden;}
-      table.dataframe th, table.dataframe td{padding:8px 10px;}
-      thead th{background:#1f497d; color:#fff;}
-      tbody tr:nth-child(odd){background:#f1f6fd;}
-      tbody tr:nth-child(even){background:#e6eef9;}
+      .app-logo{
+        width:32px; height:32px; border-radius:6px;
+        background:linear-gradient(135deg, var(--accent) 0%, #6366f1 100%);
+        display:flex; align-items:center; justify-content:center;
+        font-weight:700; font-size:14px; color:#fff; flex-shrink:0;
+      }
+      .app-title{font-size:15px; font-weight:700; color:var(--text-bright); letter-spacing:-.3px;}
+      .app-subtitle{font-size:11px; color:var(--text-muted); margin-top:1px; letter-spacing:.4px; text-transform:uppercase;}
+
+      /* ── cards ────────────────────────────────────── */
+      .card{
+        background:var(--bg-card); border:1px solid var(--border);
+        border-radius:var(--radius); padding:14px 16px; margin:10px 12px 0;
+      }
+      .card-title{
+        font-size:11px; font-weight:600; color:var(--text-muted);
+        text-transform:uppercase; letter-spacing:.8px; margin:0 0 10px;
+        padding-bottom:6px; border-bottom:1px solid var(--border);
+      }
+      .muted{color:var(--text-muted); font-size:12px; margin-top:2px; font-family:var(--font-sans);}
+
+      /* ── ticker strip ────────────────────────────── */
+      .ticker-strip{
+        display:flex; flex-wrap:wrap; gap:4px 10px; margin-top:6px;
+        padding:8px 12px; background:var(--bg-secondary); border-radius:var(--radius);
+        border:1px solid var(--border); font-family:var(--font-mono); font-size:12px;
+      }
+      .ts-item{display:inline-flex; align-items:center; gap:4px;}
+      .ts-label{color:var(--text-muted); font-size:10px; text-transform:uppercase; letter-spacing:.5px;}
+      .ts-val{color:var(--text-primary); font-weight:500;}
+      .ts-val.up{color:var(--accent-green);}
+      .ts-val.hl{color:var(--accent);}
+
+      /* ── widgets overrides ───────────────────────── */
+      .app-wrap .widget-label{
+        color:var(--text-secondary) !important; font-size:11px !important;
+        font-weight:500 !important; text-transform:uppercase !important;
+        letter-spacing:.5px !important; font-family:var(--font-sans) !important;
+      }
+      .app-wrap .widget-text input,
+      .app-wrap .widget-dropdown select{
+        background:var(--bg-secondary) !important; color:var(--text-primary) !important;
+        border:1px solid var(--border) !important; border-radius:var(--radius) !important;
+        font-family:var(--font-mono) !important; font-size:13px !important;
+        padding:4px 8px !important;
+      }
+      .app-wrap .widget-text input:focus,
+      .app-wrap .widget-dropdown select:focus{
+        border-color:var(--accent) !important;
+        box-shadow:0 0 0 2px rgba(59,130,246,.25) !important;
+      }
+      .app-wrap .widget-readout{
+        color:var(--accent) !important; font-family:var(--font-mono) !important;
+        font-weight:600 !important; font-size:13px !important;
+      }
+      .app-wrap .widget-slider .ui-slider{
+        background:var(--bg-secondary) !important; border-color:var(--border) !important;
+      }
+      .app-wrap .widget-slider .ui-slider-handle{
+        background:var(--accent) !important; border:none !important;
+      }
+      .app-wrap .widget-slider .noUi-connect{
+        background:var(--accent) !important;
+      }
+
+      /* ── buttons ─────────────────────────────────── */
+      .app-wrap .widget-button > button{
+        border-radius:var(--radius) !important; border:1px solid var(--border) !important;
+        background:var(--bg-secondary) !important; color:var(--text-primary) !important;
+        font-family:var(--font-sans) !important; font-size:12px !important;
+        font-weight:600 !important; padding:6px 16px !important;
+        text-transform:uppercase !important; letter-spacing:.5px !important;
+        transition:all .15s ease !important; box-shadow:none !important;
+      }
+      .app-wrap .widget-button > button:hover{
+        background:var(--bg-card-alt) !important;
+        border-color:var(--accent) !important;
+        color:var(--accent) !important;
+      }
+      .app-wrap .mod-primary > button{
+        background:var(--accent) !important; border-color:var(--accent) !important;
+        color:#fff !important;
+      }
+      .app-wrap .mod-primary > button:hover{
+        background:var(--accent-hover) !important; color:#fff !important;
+      }
+      .app-wrap .mod-info > button{
+        background:transparent !important; border-color:var(--accent) !important;
+        color:var(--accent) !important;
+      }
+
+      /* ── toggle buttons ──────────────────────────── */
+      .app-wrap .widget-toggle-buttons .widget-toggle-button{
+        border-radius:var(--radius) !important; overflow:hidden;
+      }
+      .app-wrap .widget-toggle-buttons button{
+        background:var(--bg-secondary) !important; color:var(--text-secondary) !important;
+        border:1px solid var(--border) !important; font-size:12px !important;
+        font-weight:600 !important; font-family:var(--font-sans) !important;
+      }
+      .app-wrap .widget-toggle-buttons .mod-active button{
+        background:var(--accent) !important; color:#fff !important;
+        border-color:var(--accent) !important;
+      }
+      .app-wrap .widget-toggle-button.mod-active > button{
+        background:var(--accent) !important; color:#fff !important;
+        border-color:var(--accent) !important;
+      }
+
+      /* ── checkbox ────────────────────────────────── */
+      .app-wrap .widget-checkbox input[type=checkbox]{
+        accent-color:var(--accent);
+      }
+
+      /* ── tabs ────────────────────────────────────── */
+      .app-wrap .widget-tab > .p-TabBar{
+        background:var(--bg-secondary) !important;
+        border-bottom:2px solid var(--border) !important;
+      }
+      .app-wrap .widget-tab .p-TabBar-tab{
+        color:var(--text-muted) !important; font-size:11px !important;
+        font-weight:600 !important; text-transform:uppercase !important;
+        letter-spacing:.8px !important; padding:8px 18px !important;
+        border:none !important; background:transparent !important;
+        font-family:var(--font-sans) !important;
+      }
+      .app-wrap .widget-tab .p-TabBar-tab.p-mod-current{
+        color:var(--accent) !important;
+        border-bottom:2px solid var(--accent) !important;
+        margin-bottom:-2px;
+      }
+      .app-wrap .widget-tab .p-TabBar-tab:hover{
+        color:var(--text-primary) !important;
+      }
+      .app-wrap .widget-tab > .p-TabBar .p-TabBar-tabLabel{
+        font-family:var(--font-sans) !important;
+      }
+      .app-wrap .p-TabPanel-stackedPanel,
+      .app-wrap .widget-tab-contents{
+        background:var(--bg-card) !important;
+        border:1px solid var(--border) !important;
+        border-top:none !important;
+        border-radius:0 0 var(--radius) var(--radius) !important;
+      }
+
+      /* ── output / log ────────────────────────────── */
+      .app-wrap .widget-output{
+        background:var(--bg-primary) !important;
+        color:var(--text-secondary) !important;
+        font-family:var(--font-mono) !important;
+        font-size:12px !important;
+        border:1px solid var(--border) !important;
+        border-radius:var(--radius) !important;
+        padding:8px !important;
+      }
+      .app-wrap .widget-output pre{
+        color:var(--text-secondary) !important;
+        font-family:var(--font-mono) !important;
+      }
+
+      /* ── tables ──────────────────────────────────── */
+      .app-wrap table.dataframe{
+        border-collapse:collapse; width:100%;
+        font-family:var(--font-mono); font-size:12px;
+        border:1px solid var(--border); border-radius:var(--radius); overflow:hidden;
+      }
+      .app-wrap table.dataframe caption{
+        caption-side:top; text-align:left;
+        font-family:var(--font-sans); font-size:11px; font-weight:600;
+        color:var(--text-muted); text-transform:uppercase; letter-spacing:.5px;
+        padding:8px 10px; background:var(--bg-secondary);
+        border:1px solid var(--border); border-bottom:none;
+        border-radius:var(--radius) var(--radius) 0 0;
+      }
+      .app-wrap table.dataframe thead th{
+        background:#1a2744 !important; color:var(--accent) !important;
+        font-weight:600 !important; font-size:11px !important;
+        text-transform:uppercase !important; letter-spacing:.5px !important;
+        padding:8px 10px !important; border-bottom:2px solid var(--accent) !important;
+        font-family:var(--font-sans) !important;
+      }
+      .app-wrap table.dataframe tbody td{
+        padding:6px 10px !important; border-bottom:1px solid var(--border) !important;
+        color:var(--text-primary) !important;
+      }
+      .app-wrap table.dataframe tbody tr:nth-child(odd){background:var(--bg-card) !important;}
+      .app-wrap table.dataframe tbody tr:nth-child(even){background:var(--bg-card-alt) !important;}
+      .app-wrap table.dataframe tbody tr:hover{background:#1e3a5f !important;}
+
+      /* ── status bar ──────────────────────────────── */
+      .status-bar{
+        display:flex; align-items:center; gap:12px; padding:6px 16px;
+        background:var(--bg-secondary); border-top:1px solid var(--border);
+        font-size:10px; color:var(--text-muted); text-transform:uppercase;
+        letter-spacing:.5px; border-radius:0 0 var(--radius-lg) var(--radius-lg);
+        font-family:var(--font-mono);
+      }
+      .status-dot{width:6px; height:6px; border-radius:50%; background:var(--accent-green); flex-shrink:0;}
     </style>
     """
     display(HTML(css))
 
 def _set_plotly_theme():
-    base = go.layout.Template(layout=go.Layout(font=dict(family="ui-sans-serif, -apple-system, Segoe UI, Roboto, Helvetica, Arial",size=13, color="#1f2937"), paper_bgcolor="white", plot_bgcolor="white", colorway=["#2b6cb0","#38a169","#dd6b20","#805ad5","#e53e3e","#319795"], hoverlabel=dict(bgcolor="white"), margin=dict(l=20, r=20, t=50, b=20)))
-    pio.templates["sfv_custom_light"] = base
-    pio.templates.default = "plotly_white+sfv_custom_light" 
+    base = go.layout.Template(layout=go.Layout(
+        font=dict(family="Inter, -apple-system, system-ui, sans-serif", size=12, color="#94a3b8"),
+        paper_bgcolor="#151d2e",
+        plot_bgcolor="#111827",
+        colorway=["#3b82f6","#10b981","#f59e0b","#8b5cf6","#ef4444","#06b6d4","#ec4899","#84cc16"],
+        hoverlabel=dict(bgcolor="#1e293b", bordercolor="#2563eb", font=dict(color="#e2e8f0", family="JetBrains Mono, monospace", size=12)),
+        title=dict(font=dict(size=14, color="#e2e8f0"), x=0.0, xanchor="left"),
+        xaxis=dict(gridcolor="#1e293b", zerolinecolor="#1e293b", linecolor="#1e293b", tickfont=dict(size=11)),
+        yaxis=dict(gridcolor="#1e293b", zerolinecolor="#1e293b", linecolor="#1e293b", tickfont=dict(size=11)),
+        legend=dict(bgcolor="rgba(21,29,46,0.85)", bordercolor="#1e293b", borderwidth=1, font=dict(size=11)),
+        margin=dict(l=20, r=20, t=50, b=20)))
+    pio.templates["terminal_dark"] = base
+    pio.templates.default = "plotly_dark+terminal_dark"
 
 _install_ui_theme()
 _set_plotly_theme()
 
 _w = lambda w: widgets.Layout(width=w)
 
-ticker_w = widgets.Text(value='AAPL', description='Ticker:', layout=_w('220px'))
-expiry_w = widgets.Dropdown(description='Expiry:', options=[], layout=_w('240px'))
-opt_type_w = widgets.ToggleButtons(options=['Call','Put'], value='Call', description='Tipo:', tooltips=['Prezzi CALL','Prezzi PUT'], layout=_w('240px'))
-sims_w = widgets.IntSlider(value=10000, min=2000, max=50000, step=1000, description='Simulations', readout_format='d', layout=_w('320px'))
-sfvN_w = widgets.IntSlider(value=1, min=1, max=60, step=1, description='SFV steps (QE)', readout_format='d', layout=_w('320px'))
-dev_w = widgets.ToggleButton(value=False, description='Developer', tooltip='Mostra log ottimizzazione')
-run_btn = widgets.Button(description='Esegui Analisi', button_style='primary', icon='play')
-oos_btn = widgets.Button(description='Analisi OOS (LOEO)', icon='flask', button_style='info')
-oos_enable_w = widgets.Checkbox(value=False, description="OOS (LOEO)", indent=False)
-title_html = widgets.HTML("<h3 style='margin:0; color:#1f2937;'>SFV vs Heston - Analysis</h3>")
-subtitle_html = widgets.HTML("<div class='muted'>Analisi comparativa modelli · Heston & SFV</div>")
-badges_html = widgets.HTML("<div class='badges'></div>")
+ticker_w = widgets.Text(value='AAPL', description='Ticker:', layout=_w('200px'))
+expiry_w = widgets.Dropdown(description='Expiry:', options=[], layout=_w('220px'))
+opt_type_w = widgets.ToggleButtons(options=['Call','Put'], value='Call', description='Side:', tooltips=['Prezzi CALL','Prezzi PUT'], layout=_w('220px'))
+sims_w = widgets.IntSlider(value=10000, min=2000, max=50000, step=1000, description='MC Sims:', readout_format='d', layout=_w('300px'))
+sfvN_w = widgets.IntSlider(value=1, min=1, max=60, step=1, description='SFV N(QE):', readout_format='d', layout=_w('300px'))
+dev_w = widgets.ToggleButton(value=False, description='DEV', tooltip='Mostra log ottimizzazione')
+run_btn = widgets.Button(description='Run Analysis', button_style='primary', icon='play')
+oos_btn = widgets.Button(description='OOS (LOEO)', icon='flask', button_style='info')
+oos_enable_w = widgets.Checkbox(value=False, description="Auto OOS", indent=False)
+ticker_strip_html = widgets.HTML("<div class='ticker-strip'></div>")
 
-log_out = widgets.Output(layout={'border':'1px solid #bbb'})
+log_out = widgets.Output()
 tables_out = widgets.Output()
 plots_out = widgets.Output()
 oos_out = widgets.Output()
 
-controls_card = widgets.VBox([widgets.HTML("<div class='card-title'>Impostazioni</div>"),
-    widgets.HBox([ticker_w, expiry_w], layout=widgets.Layout(justify_content='space-between')),
-    widgets.HBox([opt_type_w], layout=widgets.Layout(justify_content='flex-start')),
-    widgets.HBox([sims_w], layout=widgets.Layout(justify_content='flex-start')),
-    widgets.HBox([sfvN_w], layout=widgets.Layout(justify_content='flex-start')),
-    widgets.HBox([run_btn, oos_btn, dev_w], layout=widgets.Layout(gap='8px'))], layout=widgets.Layout())
+# ── Header ──
+app_header = widgets.HTML("""
+<div class='app-header'>
+  <div class='app-logo'>OT</div>
+  <div>
+    <div class='app-title'>Options Testing Facility</div>
+    <div class='app-subtitle'>SFV &middot; Heston &middot; Black-Scholes &middot; CRR &middot; Monte Carlo</div>
+  </div>
+</div>
+""")
 
-tabs = widgets.Tab(children=[
-    widgets.VBox([widgets.HTML("<div class='card-title'>Risultati</div>"), tables_out], layout=widgets.Layout()),
-    widgets.VBox([widgets.HTML("<div class='card-title'>Grafici</div>"), plots_out], layout=widgets.Layout()),
-    widgets.VBox([widgets.HTML("<div class='card-title'>OOS</div>"), oos_out], layout=widgets.Layout()),
-    widgets.VBox([widgets.HTML("<div class='card-title'>Log</div>"), log_out], layout=widgets.Layout())])
+# ── Controls card ──
+controls_card = widgets.VBox([
+    widgets.HTML("<div class='card-title'>Configuration</div>"),
+    widgets.HBox([ticker_w, expiry_w, opt_type_w], layout=widgets.Layout(gap='8px', flex_flow='row wrap')),
+    widgets.HBox([sims_w, sfvN_w], layout=widgets.Layout(gap='8px', flex_flow='row wrap')),
+    widgets.HBox([run_btn, oos_btn, oos_enable_w, dev_w], layout=widgets.Layout(gap='8px', align_items='center'))
+], layout=widgets.Layout())
 
-for i, name in enumerate(['Risultati','Grafici','OOS','Log']):
+# ── Ticker strip (live data bar) ──
+strip_card = widgets.VBox([ticker_strip_html], layout=widgets.Layout())
+
+# ── Tabs ──
+tab_results = widgets.VBox([widgets.HTML("<div class='card-title'>Pricing Results</div>"), tables_out])
+tab_charts = widgets.VBox([widgets.HTML("<div class='card-title'>Visualization</div>"), plots_out])
+tab_oos = widgets.VBox([widgets.HTML("<div class='card-title'>Out-of-Sample Analysis</div>"), oos_out])
+tab_dev = widgets.VBox([widgets.HTML("<div class='card-title'>Developer Console</div>"), log_out])
+
+tabs = widgets.Tab(children=[tab_results, tab_charts, tab_oos, tab_dev])
+for i, name in enumerate(['Results', 'Charts', 'OOS', 'Developer']):
     tabs.set_title(i, name)
 
-header = widgets.VBox([title_html, subtitle_html, badges_html], layout=widgets.Layout(padding='8px 12px'))
+# ── Status bar ──
+status_bar = widgets.HTML("""
+<div class='status-bar'>
+  <span class='status-dot'></span>
+  <span>Ready</span>
+  <span style='margin-left:auto;'>r = 4.25%</span>
+</div>
+""")
+
+# ── Assemble ──
 controls_shell = widgets.VBox([controls_card])
 controls_shell.add_class('card')
-tabs_shell = widgets.VBox([tabs])
-tabs_shell.add_class('card')
-page = widgets.VBox([header, controls_shell, tabs_shell])
+strip_shell = widgets.VBox([strip_card])
+strip_shell.add_class('card')
+tabs_shell = widgets.VBox([tabs], layout=widgets.Layout(margin='10px 12px 0'))
+
+page = widgets.VBox([app_header, controls_shell, strip_shell, tabs_shell, status_bar])
 page.add_class('app-wrap')
 display(page)
 
 def _render_badges(ticker_str, expiry_str, opt_type, S0, T, q):
-    badges_html.value = f"""
-      <div class='badges'>
-        <span class='badge blue'>Ticker: {ticker_str}</span>
-        <span class='badge'>Expiry: {expiry_str}</span>
-        <span class='badge'>Tipo: {opt_type}</span>
-        <span class='badge green'>S₀: {S0:.2f}</span>
-        <span class='badge'>T: {T:.3f}y</span>
-        <span class='badge'>q: {q:.3f}</span>
-      </div>
+    ticker_strip_html.value = f"""
+    <div class='ticker-strip'>
+      <span class='ts-item'><span class='ts-label'>Ticker</span><span class='ts-val hl'>{ticker_str}</span></span>
+      <span class='ts-item'><span class='ts-label'>Spot</span><span class='ts-val up'>{S0:.2f}</span></span>
+      <span class='ts-item'><span class='ts-label'>Expiry</span><span class='ts-val'>{expiry_str}</span></span>
+      <span class='ts-item'><span class='ts-label'>T</span><span class='ts-val'>{T:.4f}y</span></span>
+      <span class='ts-item'><span class='ts-label'>Side</span><span class='ts-val'>{opt_type}</span></span>
+      <span class='ts-item'><span class='ts-label'>Div yield</span><span class='ts-val'>{q:.4f}</span></span>
+      <span class='ts-item'><span class='ts-label'>r</span><span class='ts-val'>{RISK_FREE_RATE:.4f}</span></span>
+    </div>
     """
 
 def refresh_expiries():
@@ -1510,10 +1790,10 @@ def _render_oos_placeholder():
     with oos_out:
         oos_out.clear_output(wait=True)
         display(HTML(
-            "<div class='muted'>"
-            "Analisi Out-of-sample non eseguita. "
-            "Per eseguire un'analisi OOS seleziona la spunta <b>OOS (LOEO)</b> nelle Impostazioni "
-            "e premi <b>Esegui Analisi</b>, oppure usa il pulsante <b>Analisi OOS (LOEO)</b>."
+            "<div style='color:#64748b; font-size:12px; font-family:Inter,sans-serif; padding:16px;'>"
+            "No out-of-sample analysis has been run. "
+            "Enable <b style='color:#3b82f6;'>Auto OOS</b> in Configuration and click "
+            "<b style='color:#3b82f6;'>Run Analysis</b>, or use the <b style='color:#3b82f6;'>OOS (LOEO)</b> button."
             "</div>"))
 
 oos_btn.on_click(run_oos)
