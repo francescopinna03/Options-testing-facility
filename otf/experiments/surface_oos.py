@@ -55,9 +55,11 @@ def run_name(root: str, name: str, days: List[str], args) -> List[Dict]:
         if name not in sp_t or name not in sp_t1:
             continue
         q_t = load_day(root, t_day, name, sp_t[name],
-                       args.min_tte, args.max_tte, args.moneyness)
+                       args.min_tte, args.max_tte, args.moneyness,
+                       otm_only=not args.keep_itm)
         q_t1 = load_day(root, t1_day, name, sp_t1[name],
-                        args.min_tte, args.max_tte, args.moneyness)
+                        args.min_tte, args.max_tte, args.moneyness,
+                        otm_only=not args.keep_itm)
         if not q_t or not q_t1 or len(q_t) < 10 or len(q_t1) < 10:
             continue
 
@@ -69,7 +71,8 @@ def run_name(root: str, name: str, days: List[str], args) -> List[Dict]:
             svi = None
         res = calibrate_heston(q_t, sp_t[name],
                                feller_weight=args.feller_weight,
-                               kappa_max=args.kappa_max)
+                               kappa_max=args.kappa_max,
+                               max_iter=args.heston_max_iter)
         h = res.params
         jump = (0.0, 0.5, 50.0, 50.0)
         fit = calibrate_bridge_to_surface(
@@ -125,10 +128,17 @@ def main() -> None:
     ap.add_argument("--min-tte", type=float, default=0.08)
     ap.add_argument("--max-tte", type=float, default=0.8)
     ap.add_argument("--moneyness", type=float, default=0.20)
+    ap.add_argument("--keep-itm", action="store_true",
+                    help="keep in-the-money quotes (single-side panels, e.g. "
+                         "calls-only OptionMetrics extracts, lose a smile "
+                         "wing under the default OTM-only filter)")
     ap.add_argument("--feller-weight", type=float, default=10.0)
     ap.add_argument("--kappa-max", type=float, default=15.0)
     ap.add_argument("--paths", type=int, default=400)
     ap.add_argument("--max-iter", type=int, default=120)
+    ap.add_argument("--heston-max-iter", type=int, default=4000,
+                    help="prior-fit simplex budget (lower for quick passes: "
+                         "the pure-Python CF objective dominates runtime)")
     ap.add_argument("--json")
     ap.add_argument("--latex")
     args = ap.parse_args()

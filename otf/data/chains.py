@@ -27,10 +27,12 @@ from otf.calibration.heston_fit import MarketQuote
 __all__ = ["load_chain", "load_day", "day_dirs"]
 
 _STRIKE = ("strike", "strike_prc", "strike price")
-_EXPIRY = ("expir_date", "expiry", "expiry_date", "expiration", "maturity")
+_EXPIRY = ("expir_date", "expiry", "expiry_date", "expiration", "maturity",
+           "exdate")
 _TTE = ("tte", "years", "t")
-_IV = ("imp_volt", "iv", "implied_vol", "implied volatility", "impliedvolatility")
-_TYPE = ("putcallind", "type", "put_call", "putcall", "cp")
+_IV = ("imp_volt", "iv", "implied_vol", "implied volatility",
+       "impliedvolatility", "impl_volatility")
+_TYPE = ("putcallind", "type", "put_call", "putcall", "cp", "cp_flag")
 
 
 def _num(v) -> Optional[float]:
@@ -125,14 +127,19 @@ def day_dirs(root: str) -> List[str]:
 
 def load_day(root: str, day: str, name: str, spot: float,
              min_tte: float = 0.08, max_tte: float = 0.8,
-             moneyness: float = 0.20) -> Optional[List[MarketQuote]]:
-    """One name's cleaned chain for one collected day (None if absent)."""
+             moneyness: float = 0.20,
+             otm_only: bool = True) -> Optional[List[MarketQuote]]:
+    """One name's cleaned chain for one collected day (None if absent).
+
+    ``otm_only=False`` keeps in-the-money quotes too -- needed for
+    single-side panels (e.g. calls-only OptionMetrics extracts), where
+    dropping ITM would amputate one wing of the smile."""
     path = os.path.join(root, day, f"{name}_chain.csv")
     if not os.path.exists(path):
         return None
     return load_chain(path, today=dt.date.fromisoformat(day),
                       min_tte=min_tte, max_tte=max_tte,
-                      moneyness=moneyness, spot=spot)
+                      moneyness=moneyness, spot=spot, otm_only=otm_only)
 
 
 def load_spots(root: str, day: str) -> dict:
