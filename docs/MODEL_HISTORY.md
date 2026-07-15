@@ -68,9 +68,13 @@ From the Stocks calibration experience (flag help strings preserve it):
 
 4. **min-tte ≈ 0.08y**: sub-month smiles are jump-driven; they force a
    diffusive CF prior into ξ explosion / Feller violation.
-5. **Feller weight on the prior fit**: a CF-only prior that violates Feller
-   prices the surface but cannot be *simulated* faithfully — the bridge would
-   then fit discretization error, not structure.
+5. **Feller weight on the prior fit** (*scheme-robustness regularizer*): a
+   Feller violation does not prevent existence or simulation of the CIR; it
+   makes the *specific legacy scheme* (full-truncation Euler) inaccurate near
+   v = 0, so the bridge would fit discretization error, not structure. With a
+   QE or better scheme, non-Feller is not a structural failure. Keep the
+   penalty for the legacy engine, never as an admissibility constraint
+   (docs/DECISIONS.md D8).
 6. **kappa cap**: jumpy surfaces push the CF fit to extreme κ/ξ pairs that
    price well and simulate badly.
 7. **Backfill survivorship**: a surface rebuilt D days back is missing
