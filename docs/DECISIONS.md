@@ -218,3 +218,32 @@ implemented, tested, and documented at the point of use.
    8k/16k/32k paths, test env-gated behind SSFV_SLOW=1) confirms the
    field-noise attribution of D10.8 as a *measurement*, closing the
    review's demand that it not remain an unfalsified hypothesis.
+
+### D11 addenda (2026-07-16, second review pass)
+
+8. **Triangular scheme, not the literal limit.** The variance gauge is
+   sample selection: at fixed pilot-batch size N the active family
+   stabilizes in a finite space and is not convergence determining even
+   though the raw cumulative family is. The code at fixed N realizes one
+   row Psi_{n(N),N} of a triangular scheme; the theorem's full limit is
+   the double limit N → ∞, n(N) → ∞, var_floor_N ↓ 0. The clean
+   alternative — regularization that never permanently removes
+   directions — is the Sobolev route (M2). Not an M1 blocker: nesting of
+   the levels actually built is exact, and rejections are recorded so
+   the realized row is auditable.
+9. **Certificates decompose, defects are named.** For approximately
+   calibrated laws the signed gap obeys the exact sample identity
+   H − D_n = λᵀ(m − a) − E^Q[N^S_T]; the bundle stores
+   `moment_defect`, `semistatic_defect` and `duality_identity_residual`
+   (must sit at fp/MC noise — tested at 1e-10). A negative gap explained
+   by the defects is primal inadmissibility of the approximate fit, not
+   a weak-duality violation. The Cauchy slack likewise decomposes
+   against the coarse potential (`cauchy_moment_term`,
+   `cauchy_semistatic_term`, `cauchy_identity_residual`), separating
+   nesting error, moment error, dynamic-term error and genuine
+   Pythagorean-identity violations.
+10. **External DGP is symmetric holdout.** The calibrated multipliers
+    are frozen and the BSDE is re-solved on the holdout batch (fresh
+    Picard context); DGP, prior and fitted calls are expectations on the
+    same holdout sample. The reported law is out of sample with respect
+    to the solver's regression error, not only the moment noise.

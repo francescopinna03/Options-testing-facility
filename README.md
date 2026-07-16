@@ -7,16 +7,26 @@
 Research infrastructure for one question: **does the SFV model work on real
 option data — and does it price better than the standard alternatives?**
 
-SFV (Stochastic Feedback Volatility, in its current *Schrödinger-bridge*
-formulation) is calibrated to real LSEG Workspace option chains and compared,
-**out of sample and paired per day**, against Black-Scholes, raw-SVI and
-characteristic-function Heston. The model implemented here is the most recent
-formulation of the SFV line of work; the full lineage is documented in
+The repository now contains **two distinct law constructions** of the SFV
+(Stochastic Feedback Volatility) research line — they are compared, never
+conflated (binding record: [`docs/DECISIONS.md`](docs/DECISIONS.md), D4):
+
+1. the **legacy restricted variance-channel bridge** (`otf/models/sfv.py`,
+   `otf/calibration/`): the SFV_M2 formulation, calibrated to real LSEG
+   Workspace option chains and benchmarked out of sample against
+   Black-Scholes, raw-SVI and CF-Heston;
+2. the **SSFV projective core** (`otf/ssfv/`): the exact
+   martingale-projected entropic deformation of the paper *Schrödinger
+   Stochastic Feedback Volatility — complete formulation and technical
+   closure*, built as an information projection with a full certificate
+   system. Architecture: [`docs/SSFV_IMPLEMENTATION_ARCHITECTURE.md`](docs/SSFV_IMPLEMENTATION_ARCHITECTURE.md).
+
+The model lineage is documented in
 [`docs/MODEL_HISTORY.md`](docs/MODEL_HISTORY.md).
 
 ---
 
-## The model under test
+## Construction 1 — legacy restricted bridge (benchmark arm)
 
 Under the affine jump-diffusion **prior** Q⁰:
 
@@ -28,8 +38,8 @@ $$
 
 with $d\langle W^S,W^v\rangle_t=\rho\,dt$ and Kou double-exponential price
 jumps $J^S$ whose compensator $\kappa_S=\mathbb E[e^Y-1]$ keeps $e^{X}$ a
-discounted martingale. The **restricted Schrödinger-bridge correction** then
-deforms the prior minimally, acting on the variance channel only:
+discounted martingale. The **restricted Schrödinger-bridge correction**
+deforms the prior on the variance channel only:
 
 $$
 dv_t \;\mathrel{+}= \alpha\,g(v_t)\,v_t\Big(\rho\xi\,\partial_x\Theta+\xi^2\,\partial_v\Theta\Big)dt,
@@ -38,21 +48,54 @@ dv_t \;\mathrel{+}= \alpha\,g(v_t)\,v_t\Big(\rho\xi\,\partial_x\Theta+\xi^2\,\pa
 $$
 
 on standardized coordinates $\tilde x,\tilde v$, with an optional sigmoid
-variance gate $g$ (transient activation). Because the correction cannot
-manufacture price drift, the forward is preserved by construction; the betas
-absorb what the prior could *not* price — variance level, tails, x–v feedback
-skew.
+variance gate $g$. Calibration is two-layer: prior fit (CF Heston, IV-space
+loss, scheme-robustness regularisation) then bridge fit (Level-2 objective,
+CRN Monte Carlo).
 
-Calibration is two-layer, in the order the theory prescribes:
+This is a *different law construction* from SSFV, not an approximation of
+it: the two coincide only under $U_x=-\rho\xi U_v$, which the legacy ansatz
+does not impose. It stays as the paired benchmark arm and one axis of the
+ablation program.
 
-1. **prior fit** — Heston $(v_0,\kappa,\theta,\xi,\rho)$ on the surface via
-   characteristic function, IV-space loss, Feller/κ-cap regularisation;
-2. **bridge fit** — betas under the SFV_M2 Level-2 objective (IV +
-   vega-weighted price + martingale + control-energy + L2 [+ Sinkhorn on the
-   Breeden–Litzenberger implied terminal density]), Monte-Carlo priced with
-   common random numbers so the loss is deterministic in beta.
+## Construction 2 — SSFV projective core
 
-## The verdict machinery
+SSFV is the **information projection** of the affine prior onto the
+market-calibrated martingale set: the posterior is the minimal-entropy law
+matching bounded terminal test moments while leaving the forward a
+martingale *structurally* (Girsanov acts only on the Brownian direction
+orthogonal to the return innovation). The `otf/ssfv/` package implements
+the diffusion sector end to end:
+
+* `prior/` — Heston prior with **exposed pathwise innovations** (full-
+  truncation Euler; Andersen QE is pricing-grade and is rejected by the
+  likelihood layer);
+* `constraints/` — cumulative bounded test family (hats + capped tail
+  ramps) with a block-triangular **nested normalization plan**: exact level
+  nesting, zero-padding embeddings, recorded variance-gauge rejections;
+* `bsde/` — the reference **Picard Hopf–Cole solver** (linear killed
+  Feynman–Kac propagation + scalar martingale projection, frozen-field
+  final sweep with reported fixed-point residual) and a direct
+  quadratic-driver regression backend as diagnostic cross-check;
+* `dual/` — `ReducedMomentMapCalibrator` (static exponential-family Newton
+  warm start + Gauss–Newton with pseudo-inverse on the reduced moment map)
+  and the `ProjectiveSequence` level loop;
+* `posterior/`, `certificates/` — reweighted posterior and the mandatory
+  **CertificateBundle** per level: signed duality gap with its exact defect
+  decomposition, entropy double-entry (likelihood vs energy route),
+  martingale certificate, projective Cauchy certificate with signed slack
+  decomposition, conditioning diagnostics.
+
+A successful fit without a certificate bundle is not a valid research
+result. The synthetic certificate experiment produces the artifacts
+(manifest with concrete component serialization, per-level certificate
+JSONs, refinement table, optional dt-convergence table):
+
+```bash
+python -m otf.experiments.ssfv_synthetic --out runs/ssfv_synth_001 \
+    --paths 8192 --steps 32 --levels 0 1 [--dt-table 8 16 32 64]
+```
+
+## The verdict machinery (real data)
 
 `otf.experiments.surface_oos` runs the study the question needs: **fit every
 arm on day t, price day t+1 frozen**, same quotes, same shocks:
@@ -63,11 +106,11 @@ arm on day t, price day t+1 frozen**, same quotes, same shocks:
 | `svi` | raw-SVI slices + total-variance interpolation | the market-standard *static* surface fit |
 | `heston` | the affine prior, CF-priced | the structural benchmark |
 | `prior` | same prior, CRN-MC-priced (β=0) | the *paired* baseline for the bridge (same shocks, same discretization error) |
-| `bridge` | prior + fitted bridge correction | the model under test |
+| `bridge` | prior + fitted bridge correction | the legacy construction under test |
 
 Aggregation per name: mean IV RMSE per arm, win counts, moving-block-bootstrap
-CIs and Diebold–Mariano p-values on the paired RMSE differentials — the
-numbers a referee asks for.
+CIs and Diebold–Mariano p-values on the paired RMSE differentials. The SSFV
+projective arm joins this table once the real-surface adapter lands (M5).
 
 ---
 
@@ -76,36 +119,48 @@ numbers a referee asks for.
 ```text
 otf/
 ├── optim.py                  shared pure-stdlib Nelder-Mead
-├── models/
-│   ├── black_scholes.py      BS price / greeks / implied vol
-│   ├── heston.py             Heston CF pricer (Little-Trap formulation)
-│   ├── svi.py                raw-SVI slice fit + surface interpolation
-│   └── sfv.py                SFV PathEngine (CRN), W2/Sinkhorn, MC pricing
-├── calibration/
-│   ├── heston_fit.py         MarketQuote + CF Heston calibration
-│   ├── bridge_fit.py         bridge betas -> target terminal law
-│   └── surface_fit.py        bridge betas -> real surface (Level-2 loss)
-├── data/
-│   ├── chains.py             LSEG chain CSV loader + filters + day layout
-│   └── realized.py           realized-measure SFV prior (jump/diffusion split)
-├── evaluation/
-│   ├── pricing.py            per-model IV-RMSE scorers (common yardstick)
-│   └── stats.py              DM test, block bootstrap, LaTeX tables
-└── experiments/
-    ├── calibrate_surface.py  one-day two-layer calibration CLI
-    └── surface_oos.py        multi-model day-ahead OOS study CLI
-scripts/
-├── collect_chains.py         daily chain snapshot (LSEG Workspace SDK)
-└── backfill_chains.py        rebuild past surfaces from contract IV history
-tests/                        pytest suite (pure stdlib, seconds)
-legacy/base_pricing.py        the original monolithic thesis script
-docs/MODEL_HISTORY.md         SFV model lineage and provenance
+├── models/                   BS / Heston CF / raw-SVI / legacy SFV engine
+├── calibration/              legacy two-layer calibration
+├── data/                     LSEG chain loader, realized measures
+├── evaluation/               IV-RMSE scorers, DM test, bootstrap, LaTeX
+├── experiments/
+│   ├── calibrate_surface.py  one-day two-layer calibration CLI
+│   ├── surface_oos.py        multi-model day-ahead OOS study CLI
+│   └── ssfv_synthetic.py     SSFV projective certificate experiment CLI
+└── ssfv/                     SSFV projective core (see above)
+    ├── types.py, interfaces.py, config.py   stdlib-only result objects,
+    │                         protocols, reproducibility manifest
+    ├── prior/  constraints/  bsde/  projection/  dual/
+    ├── posterior/  certificates/
+scripts/                      LSEG chain collectors
+tests/                        pytest suite (both lanes, see below)
+docs/
+├── DECISIONS.md              binding decision record D1–D11
+├── SSFV_IMPLEMENTATION_ARCHITECTURE.md
+└── MODEL_HISTORY.md          SFV model lineage and provenance
 ```
 
-The numerical core has **zero dependencies** (Python ≥ 3.10 stdlib only).
-Only the two collector scripts need the LSEG SDK.
+## Install & test
 
----
+The **legacy facility is pure stdlib** (`dependencies = []`); the SSFV
+numerical core lives behind extras (`docs/DECISIONS.md` D2):
+
+```bash
+# legacy lane: stdlib only — SSFV numerical tests skip themselves
+python -m venv venv && venv/bin/pip install -e '.[dev]'
+venv/bin/python -m pytest                # 40 passed, SSFV modules skipped
+
+# SSFV numerical lane
+venv/bin/pip install -e '.[numerical,dev]'
+venv/bin/python -m pytest                # full suite (~2 min CPU)
+SSFV_SLOW=1 venv/bin/python -m pytest tests/test_ssfv_external_dgp.py  # N-scaling probe
+```
+
+Extras: `numerical` (numpy, scipy), `torch`, `data` (pandas, pyarrow,
+duckdb), `dev` (pytest, hypothesis, ruff, mypy), `lseg`. CI runs both
+lanes plus a non-blocking lint/type pass
+([`.github/workflows/ci.yml`](.github/workflows/ci.yml)); `import otf` and
+`import otf.ssfv` must never pull in NumPy (asserted in CI).
 
 ## Workflow on real data
 
@@ -137,22 +192,15 @@ python -m otf.experiments.surface_oos --chains-dir chains \
 
 ---
 
-## Install & test
-
-```bash
-python -m venv venv && venv/bin/pip install -e '.[dev]'
-venv/bin/python -m pytest        # 37 tests, ~4 s
-```
-
----
-
 ## Status
 
-Working facility, actively used for the SFV research program. The
-implementation is a faithful port of the most recent SFV code (see
-`docs/MODEL_HISTORY.md` for what "most recent" means and what was left
-behind); the SVI benchmark and the multi-arm OOS harness are new here.
-Planned next steps live at the end of `docs/MODEL_HISTORY.md`.
+Working facility. The legacy construction is a faithful port of the Stocks
+implementation of SFV_M2 (see `docs/MODEL_HISTORY.md`); the SSFV projective
+core has completed milestones M0–M1 on synthetic data (self-consistent DGP
+and independent Girsanov-tilt DGP with measured N-scaling of the
+field-noise stall). Roadmap and open M2 items (Sobolev regularization,
+refinement tables, Schur conditioning certificate) live in
+`docs/DECISIONS.md` D10–D11.
 
 ## Disclaimer
 

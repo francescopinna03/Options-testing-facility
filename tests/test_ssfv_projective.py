@@ -84,16 +84,27 @@ def test_projective_cauchy_certificate(setting):
     # a negative value beyond it is a theorem violation, not a magnitude.
     assert b.cauchy_slack is not None
     assert b.cauchy_slack > -2e-3
+    # The slack's exact sample decomposition against the coarse potential:
+    # slack = moment term - dynamic term, identically on the sample. The
+    # identity residual is pure arithmetic and must sit at fp noise —
+    # anything larger is a real inconsistency in the certificate chain.
+    assert b.cauchy_identity_residual is not None
+    assert abs(b.cauchy_identity_residual) < 1e-10
 
 
 def test_duality_gap_and_martingale(setting):
     _, _, runs = setting
     for r in runs:
-        # Signed gap: weak duality requires H_LR - D_n >= 0 up to MC error.
-        assert -2e-3 < r.bundle.duality.gap < 1e-2
+        d = r.bundle.duality
+        # Signed gap: weak duality requires H_LR - D_n >= 0 up to MC error
+        # for admissible laws; for the approximate fit the gap must be
+        # *explained* by its two defects exactly (sample identity).
+        assert -2e-3 < d.gap < 1e-2
+        assert abs(d.duality_identity_residual) < 1e-10
+        assert abs(d.moment_defect) < 1e-3  # calibrated: m ~ a
         assert r.bundle.martingale.forward_error < 5e-3
         # E^{Q_n}[N^S_T] = 0: W^S stays a Q_n-martingale (structural).
-        assert abs(r.bundle.diagnostics["posterior_mean_semistatic_gain"]) < 2e-2
+        assert abs(d.semistatic_defect) < 2e-2
         assert r.bundle.diagnostics["ess_fraction"] > 0.9
 
 

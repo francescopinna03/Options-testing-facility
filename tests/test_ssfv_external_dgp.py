@@ -12,7 +12,12 @@ Known facts used as one-sided anchors:
   is an I-projection, so H_hat <= c^2 T / 2 up to estimation slack.
 
 Batches are fully separated: calibration paths, target-moment paths and
-holdout evaluation paths carry independent seeds.
+holdout evaluation paths carry independent seeds. The evaluation is
+symmetric: the calibrated multipliers are frozen and the BSDE is
+re-solved on the holdout batch (fresh Picard context), so the reported
+posterior is out of sample with respect to the solver's regression error
+as well; DGP, prior and fitted calls are all expectations on the same
+holdout sample.
 
 At M1 path counts (8192) the calibration is *expected* to stall on field
 noise — the point of the fast test is that the machinery says so loudly
@@ -63,14 +68,20 @@ def run_external(n_paths):
                                      moment_tolerance=5e-3, max_outer=8)
     ctx = cal.build_context(lvl, paths_cal)
     fit = cal.fit(lvl, targets, paths_cal, context=ctx)
-    sol = cal.solve_at(lvl, fit.lam, paths_cal, ctx)
-    post = ReweightedPosterior(paths_cal, sol)
+
+    # Truly out-of-sample posterior: freeze the calibrated multipliers,
+    # rebuild the Picard context on the *holdout* batch, and solve the
+    # BSDE there — the reported law is then out of sample with respect to
+    # the regression error of the solver too, not only the moment noise.
+    ctx_out = cal.build_context(lvl, paths_out)
+    sol_out = cal.solve_at(lvl, fit.lam, paths_out, ctx_out)
+    post_out = ReweightedPosterior(paths_out, sol_out)
 
     w_out = tilt_weights(paths_out, C)
     s_out = np.exp(paths_out.x[:, -1])
     calls_dgp = np.array([(w_out * np.maximum(s_out - k, 0.0)).sum() for k in STRIKES])
     calls_prior = np.array([np.maximum(s_out - k, 0.0).mean() for k in STRIKES])
-    return fit, post, calls_dgp, calls_prior
+    return fit, post_out, calls_dgp, calls_prior
 
 
 @pytest.fixture(scope="module")
