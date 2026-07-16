@@ -36,8 +36,11 @@ MOMENT_TOL = 6e-3  # ~ MC noise floor of the self-consistent targets
 def setting():
     paths = PRIOR.simulate(N_PATHS, N_STEPS, T, seed=1729)
     solver = PicardHopfColeSolver().for_prior(PRIOR)
-    cal = ReducedMomentMapCalibrator(FAMILY, solver=solver, max_outer=4,
-                                    moment_tolerance=2e-3)
+    # Implicit-differentiation Jacobians make outer iterations cheap; the
+    # budget must absorb platform-dependent LM trajectories (BLAS
+    # reduction order shifts the iterates slightly).
+    cal = ReducedMomentMapCalibrator(FAMILY, solver=solver, max_outer=10,
+                                     moment_tolerance=2e-3)
 
     # DGP 2: known potential at the fine level, sup|Phi*| = 0.4.
     lvl1 = FAMILY.normalize(FAMILY.level(1), paths.x[:, -1])
