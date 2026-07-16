@@ -132,13 +132,28 @@ class ReducedMomentMapCalibrator:
                                       self._dynamic_offset(sol_w, paths))
         # The static stage has no dynamic feedback, so on barely
         # identifiable directions (§6.3) it can run far: apply the same
-        # exact sup-norm trust region as stage 2 to its total move.
+        # exact sup-norm trust region as stage 2 to its total move, then
+        # backtrack the whole move toward the start until the ESS survives
+        # and the Picard fixed point holds (an overconfident static tilt
+        # at low path counts can otherwise collapse the weights before
+        # Gauss-Newton ever sees a usable state).
         dphi0 = sup_phi(lam - lam0)
         if dphi0 > self.delta_phi_max:
             lam = lam0 + (lam - lam0) * (self.delta_phi_max / dphi0)
+        for _ in range(self.max_backtracks + 1):
+            try:
+                m, ess, sol = moments_of(lam)
+            except ValueError:
+                lam = lam0 + 0.5 * (lam - lam0)
+                continue
+            if ess >= self.min_ess_fraction:
+                break
+            lam = lam0 + 0.5 * (lam - lam0)
+        else:
+            lam = lam0
+            m, ess, sol = moments_of(lam)
 
         # Stage 2: Gauss-Newton on the field-refreshed moment map.
-        m, ess, sol = moments_of(lam)
         grad = targets - m
         gnorm = float(np.linalg.norm(grad))
         converged = gnorm < self.moment_tolerance

@@ -141,6 +141,31 @@ def test_dual_calibration_recovers_the_law(paths, level, solver, context, lam_st
     assert abs(post_hat.entropy_lr() - post_star.entropy_lr()) < 2e-3
 
 
+def test_dt_refinement_no_first_order_bias_visible(level, solver, lam_star):
+    """The score ratio gs/ehc is a *first-order* discretization of the
+    Feynman-Kac score (kill = 1 + O(dt)), classified as such — never an
+    exact discrete identity. This test pins the observable consequence:
+    mean-type identity gaps (systematic bias) stay at the MC noise floor
+    across a dt refinement, and the fixed-point residual does not grow.
+    Variance-type metrics (energy_identity_rms) accumulate per-step
+    estimation noise and are NOT expected to shrink with dt — the CLI
+    --dt-table records both, labeled."""
+    pot = LambdaPotential(FAMILY, level, lam_star)
+    for steps in (8, 16, 32):
+        p = PRIOR.simulate(N_PATHS, steps, T, seed=1729)
+        ctx = solver.build_context(p, extra_knots=level.knots)
+        sol = solver.solve(p, pot, ctx)
+        dt = T / steps
+        zp = sol.z[:, :, 1]
+        log_l_en = (zp * p.d_w[:, :, 1]).sum(axis=1) - 0.5 * (zp**2).sum(axis=1) * dt
+        raw_lr = (pot.terminal_value(p.x[:, -1])
+                  - (sol.z[:, :, 0] * p.d_w[:, :, 0]).sum(axis=1) - sol.y0)
+        sys_gap = abs(float((raw_lr - log_l_en).mean()))
+        assert sys_gap < 1e-3, f"systematic LR/EN gap {sys_gap:.2e} at {steps} steps"
+        assert sol.residuals["fixed_point_residual"] < 1e-4
+        assert sol.residuals["likelihood_normalization"] < 1e-3
+
+
 def test_null_targets_recover_the_prior(paths, level, solver, context):
     """Pure-Heston DGP: targets computed from the prior itself must return
     (numerically) zero deformation (arch doc §14.1 DGP 1, §16.2)."""

@@ -40,6 +40,10 @@ def main(argv=None) -> int:
     ap.add_argument("--seed", type=int, default=1729)
     ap.add_argument("--levels", type=int, nargs="+", default=[0, 1])
     ap.add_argument("--potential-scale", type=float, default=0.5)
+    ap.add_argument("--dt-table", type=int, nargs="+", default=None,
+                    metavar="STEPS",
+                    help="also emit dt_convergence_table.json across these "
+                         "step counts (same horizon, same DGP potential)")
     args = ap.parse_args(argv)
 
     out = pathlib.Path(args.out)
@@ -114,6 +118,41 @@ def main(argv=None) -> int:
 
     for row in table:
         print(" ".join(f"{k}={v}" for k, v in row.items()))
+
+    if args.dt_table:
+        # dt-refinement of the first-order score discretization gs/ehc.
+        # Mean-type gaps carry the systematic (discretization) bias;
+        # variance-type metrics accumulate per-step estimation noise and
+        # are expected to GROW with the step count at fixed N — both are
+        # recorded, labeled, so the table cannot be misread.
+        pot = LambdaPotential(family, fine, lam_star)
+        dt_rows = []
+        for steps in sorted(args.dt_table):
+            p = prior.simulate(args.paths, steps, args.horizon,
+                               seed=derive_seed(args.seed, "prior"))
+            ctx = solver.build_context(p, extra_knots=np.asarray(fine.knots))
+            sol = solver.solve(p, pot, ctx)
+            post = ReweightedPosterior(p, sol)
+            dt = args.horizon / steps
+            zp = sol.z[:, :, 1]
+            log_l_en = (zp * p.d_w[:, :, 1]).sum(axis=1) - 0.5 * (zp**2).sum(axis=1) * dt
+            raw_lr = (pot.terminal_value(p.x[:, -1])
+                      - (sol.z[:, :, 0] * p.d_w[:, :, 0]).sum(axis=1) - sol.y0)
+            dt_rows.append({
+                "steps": steps,
+                "dt": dt,
+                "y0": sol.y0,
+                "systematic_lr_en_gap_mean": abs(float((raw_lr - log_l_en).mean())),
+                "entropy_lr": post.entropy_lr(),
+                "entropy_en": post.entropy_en(),
+                "likelihood_normalization": sol.residuals["likelihood_normalization"],
+                "energy_identity_rms_variance_dominated": sol.residuals["energy_identity_rms"],
+                "fixed_point_residual": sol.residuals["fixed_point_residual"],
+            })
+        (out / "dt_convergence_table.json").write_text(json.dumps(dt_rows, indent=2))
+        for row in dt_rows:
+            print(" ".join(f"{k}={v}" for k, v in row.items()))
+
     print(f"artifacts written to {out}")
     return 0
 
