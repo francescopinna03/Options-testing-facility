@@ -1,4 +1,3 @@
-import math
 
 from otf.calibration.bridge_fit import calibrate_bridge
 from otf.calibration.heston_fit import MarketQuote, calibrate_heston

@@ -53,7 +53,6 @@ __all__ = ["build_certificate_bundle", "direct_kl", "PreviousLevelData"]
 
 def direct_kl(post_fine: ReweightedPosterior, post_coarse: ReweightedPosterior) -> float:
     """KL(Q_fine | Q_coarse) estimated on the common prior paths."""
-    n = post_fine.paths.n_paths
     wf = np.maximum(post_fine.weights(), 1e-300)
     wc = np.maximum(post_coarse.weights(), 1e-300)
     return float(wf @ (np.log(wf) - np.log(wc)))

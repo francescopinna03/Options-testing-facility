@@ -33,7 +33,6 @@ CF-Heston benchmark arms.
 from __future__ import annotations
 import argparse
 import json
-import math
 from typing import Dict, List
 
 from otf.calibration.heston_fit import calibrate_heston
