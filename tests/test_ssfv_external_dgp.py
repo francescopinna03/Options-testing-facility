@@ -25,10 +25,10 @@ produce.
 
 import os
 
-import numpy as np
 import pytest
 
 pytest.importorskip("scipy")
+np = pytest.importorskip("numpy")
 
 from otf.ssfv.bsde.picard import PicardHopfColeSolver
 from otf.ssfv.constraints.hat_family import NestedHatFamily

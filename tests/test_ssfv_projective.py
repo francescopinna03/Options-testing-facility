@@ -14,10 +14,9 @@ DGP 3) needs the Sobolev-regularized refinement study and is M2 scope.
 
 import json
 
-import numpy as np
 import pytest
 
-pytest.importorskip("numpy")
+np = pytest.importorskip("numpy")
 
 from otf.ssfv.bsde.picard import PicardHopfColeSolver
 from otf.ssfv.constraints.hat_family import LambdaPotential, NestedHatFamily

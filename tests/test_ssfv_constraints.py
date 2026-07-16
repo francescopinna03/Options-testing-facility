@@ -3,10 +3,9 @@
 embedded level-n with zero new coefficients reproduces level n; review
 fixes R1 — tail tests — and R2 — structural nesting)."""
 
-import numpy as np
 import pytest
 
-pytest.importorskip("numpy")
+np = pytest.importorskip("numpy")
 
 from otf.ssfv.constraints.hat_family import LambdaPotential, NestedHatFamily
 

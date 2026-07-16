@@ -11,10 +11,10 @@ field, not merely the coefficient vector"), so recovery is asserted on the
 law — call prices, entropy, moments — not on the raw lambda vector.
 """
 
-import numpy as np
 import pytest
 
 pytest.importorskip("scipy")
+np = pytest.importorskip("numpy")
 
 from otf.ssfv.bsde.picard import PicardHopfColeSolver
 from otf.ssfv.constraints.hat_family import LambdaPotential, NestedHatFamily

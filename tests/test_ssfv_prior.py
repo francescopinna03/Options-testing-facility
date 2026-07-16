@@ -8,10 +8,9 @@ exposed innovations d_w are *exactly* the ones that generated the paths
 
 import math
 
-import numpy as np
 import pytest
 
-pytest.importorskip("numpy")
+np = pytest.importorskip("numpy")
 
 from otf.ssfv.prior.heston import HestonPrior
 

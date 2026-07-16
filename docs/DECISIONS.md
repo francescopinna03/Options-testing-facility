@@ -21,7 +21,8 @@ One vocabulary across code, docs, and paper revisions:
 | `ProjectedBSDESolver`        | `ProjectedBSDE`                          |
 | `FiniteDualCalibrator`       | `SSFVCalibrator` (with `ProjectiveSequence`) |
 | `ProjectiveSequence`         | `SSFVCalibrator` (level loop)            |
-| `PosteriorMeasure`           | — (likelihood + transformed characteristics) |
+| `ReweightedPosteriorMeasure` | — (likelihood route, implemented)         |
+| `CharacteristicPosteriorModel` | — (transformed characteristics, future direct simulation; split per D11.6) |
 | `CertificateBundle`          | —                                        |
 | `SSFVEvaluator`              | `SSFVEvaluator`                          |
 | `ImaginaryTimePropagator`    | `ImaginaryTimePropagator` — **out of core**, see D5 |
@@ -155,3 +156,65 @@ point of use in the code.
    refinement study + Sobolev regularization are the cure, and the
    certificates already detect the failure mode (ESS collapse, entropy
    discrepancy).
+
+## D11 — M1 review closure (added 2026-07-16, PR #2 review)
+
+Outcomes of the foundational review of the first code drop; each item is
+implemented, tested, and documented at the point of use.
+
+1. **Cumulative tail-testing family.** A fixed-interval hat family is
+   *not* convergence determining on R (normalized hats are constant in
+   the tails). Levels are now cumulative: level n+1 keeps every level-n
+   column unchanged and appends midpoint hats, outward-extension hats
+   (observed support grows without bound) and capped tail ramps.
+   Convergence determination is claimed for the cumulative limit only.
+2. **Nested normalization plan.** Per-level independent standardization
+   plus gauge removal destroyed exact nesting. Normalization is now a
+   block-triangular plan: inherited columns keep their transform verbatim
+   and can never be removed; new columns are residualized (modified
+   Gram-Schmidt on the pilot sample) against everything already accepted;
+   rejections (raw or residual variance below `var_floor`) are recorded.
+   `C_{n+1} ⊆ C_n` is structural; upward embedding is zero-padding
+   verified at 1e-12. The projective Cauchy certificate is a theorem
+   again, not an empirical diagnostic.
+3. **Frozen-field solution semantics.** The Picard solver ends with a
+   final consistency sweep: the converged field Z-bar is frozen, one last
+   linear propagation rebuilds (h, Y_0, density) in a single pass, and
+   the sweep-extracted fields are a diagnostic only. The returned object
+   is an approximate solution of the frozen linear problem plus a
+   reported fixed-point residual r_FP = ||Z^{S,eval} − Z-bar^S||; the
+   solve fails loudly above `fp_tolerance`. Substituting Z^eval back
+   would re-associate h with the previous field and is never done.
+   The score ratio gs/ehc is classified as a first-order-in-dt
+   discretization; the dt table (CLI `--dt-table`, dual-solver test)
+   records mean-type (bias) and variance-type (noise-accumulating)
+   metrics separately.
+4. **Calibrator is a reduced-moment-map solver, and says so.**
+   `ReducedMomentMapCalibrator` (was `AlternatingDualCalibrator`). The
+   moment-map zero coincides with the sample-dual FOC by a structural
+   theorem: Girsanov moves only W^perp in the diffusion sector, so W^S
+   stays a Q-Brownian motion and E^Q[d_lambda N^S] = 0 (documented in
+   the module docstring). Steps are accepted only if the moment residual
+   strictly decreases AND the ESS survives; the stage-1 static move is
+   trust-regioned (exact sup-norm) and ESS-backtracked. Certified dual
+   ascent via implicit differentiation of the Picard fixed point is M2.
+5. **Signed certificates.** `DualityCertificate.gap = H_LR − D_n`
+   (signed; weak duality demands ≥ 0 up to MC error),
+   `ProjectiveCertificate.cauchy_slack = ΔH − KL` (signed), and
+   `posterior_mean_semistatic_gain = E^{Q_n}[N^S_T]` (must vanish) are
+   reported; negative values beyond MC tolerance fail tests, never get
+   absolute-valued away.
+6. **Honest interfaces and manifests.** `PosteriorMeasure` split into
+   `ReweightedPosteriorMeasure` (implemented) and
+   `CharacteristicPosteriorModel` (future direct simulation); config
+   defaults name the algorithms that actually run; the experiment
+   manifest serializes the concrete component dataclasses field by field;
+   the diffusion projector reports min(v) instead of a placeholder.
+7. **Independent external DGP with known answers.** Girsanov tilt of
+   W^perp with constant control c: exact entropy c²T/2, one-sided
+   I-projection bound on the calibrated entropy, independent seeds for
+   calibration/targets/holdout. At M1 path counts the fit stalls loudly;
+   the measured N-scaling of the stall (5.7e-2 / 3.9e-2 / 7.9e-3 at
+   8k/16k/32k paths, test env-gated behind SSFV_SLOW=1) confirms the
+   field-noise attribution of D10.8 as a *measurement*, closing the
+   review's demand that it not remain an unfalsified hypothesis.
