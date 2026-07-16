@@ -307,3 +307,34 @@ throughout. Findings are recorded as measurements.
    unidentifiable FOC-residual split, computed from the implicit-diff
    Jacobian carried by `DualFitResult.reduced_jacobian`, with the same
    floor the optimizer used (threaded by `ProjectiveSequence`).
+
+### D12 addenda (refinement-cascade findings)
+
+8. **Picard iteration ceiling is not a cost.** The loop early-stops on
+   `picard_tol`, so converged solves never see the ceiling; fine
+   constraint levels (sharper terminal kinks) genuinely need tens of
+   damped iterations. Ceiling raised 12 → 60; a low ceiling turned fine
+   levels into fixed-point failures.
+9. **Dual-ascent acceptance (completing the first review's
+   prescription).** LM candidates must also not decrease the
+   (regularized) sample dual: at large deformations the noisy fields
+   underestimate Y_0^sample, the sample dual is overestimated far from
+   the origin, and a monotone-FOC trail can walk into a spurious
+   large-entropy basin. Stage 1's total move is backtracked under the
+   same dual condition against the starting point.
+10. **Gauge is resolution-dependent — the mechanism of the refinement
+    cascade.** A calibrated level can carry a potential component of
+    high amplitude on rough/rare-support columns that its own
+    resolution hedges almost exactly (law unchanged, H tiny) but the
+    finer level does not (measured: the same function solved with the
+    finer context jumps from H ~ 2e-4 to H ~ 0.13; warm-started
+    cascades reach H ~ 1.9 against H* ~ 1e-3). Two structural cures,
+    both applied: the static stage is restricted to the identifiable
+    subspace of the reduced Jacobian at its starting point (never load
+    directions the dynamics cancel), and — decisively — **Sobolev
+    regularization, whose measured M2 role is exactly this**: making
+    the potential representative well-posed across refinement levels.
+    With sigma^2 = 3e-4..1e-3 the 4-level study gives a clean entropy
+    plateau (H = [0, 3e-4, 3e-4, 2.8e-3] against H* = 9.5e-4, sup|Phi|
+    bounded); with sigma^2 = 0 it explodes. Sobolev belongs to the
+    projective/refinement axis, not to the external-noise axis (D12.2).

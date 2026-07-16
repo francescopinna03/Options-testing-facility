@@ -141,11 +141,18 @@ def test_four_level_refinement_plateau(setting):
     add constraints the DGP posterior already satisfies, so H_n increases
     toward H* and stops there (I-projection monotonicity). Every
     consecutive pair carries its Cauchy certificate with the exact-sample
-    decomposition."""
+    decomposition.
+
+    Sobolev regularization is ON: its measured M2 role (D12) is exactly
+    here — without it the potential representative loads high-amplitude
+    rough columns that are gauge at the coarse resolution but poison the
+    finer level's warm start (measured cascade to H ~ 1.9 vs H* ~ 1e-3;
+    with sigma^2 = 1e-3 the plateau holds and sup|Phi| stays bounded)."""
     paths, post_star, _ = setting
     solver = PicardHopfColeSolver().for_prior(PRIOR)
     cal = ReducedMomentMapCalibrator(FAMILY, solver=solver, max_outer=4,
-                                     moment_tolerance=2e-3)
+                                     moment_tolerance=2e-3,
+                                     sobolev_sigma2=1e-3)
 
     def targets_fn(level):
         psi = FAMILY.evaluate_normalized(level, paths.x[:, -1])

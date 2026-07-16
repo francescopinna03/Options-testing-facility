@@ -88,7 +88,11 @@ class PicardHopfColeSolver:
     # "derivatives" uses the analytic basis derivative of the fitted h
     # (step-function in x for hats: noisier, kept as a cross-check).
     score_from: str = "increments"
-    n_picard: int = 12
+    # Iteration ceiling, not a cost: the loop early-stops on picard_tol,
+    # so converged solves never see the ceiling. Fine constraint levels
+    # (sharper terminal kinks) genuinely need tens of damped iterations —
+    # a low ceiling turns them into fixed-point failures.
+    n_picard: int = 60
     picard_damping: float = 0.6  # under-relaxation of the Lambda-field update
     picard_tol: float = 1.0e-3  # early stop on rms field change
     # Acceptance threshold on the fixed-point residual of the final

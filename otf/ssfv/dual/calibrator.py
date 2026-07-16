@@ -103,6 +103,14 @@ class ReducedMomentMapCalibrator:
     # and a relative cutoff would silently discard everything else.
     jac_rcond: float = 3.0e-2
     lm_mu0: float = 1.0e-2  # initial Levenberg-Marquardt damping
+    # Dual-ascent acceptance slack: a candidate must also not DECREASE
+    # the (regularized) sample dual by more than this. FOC-residual
+    # decrease alone is not enough — at large deformations the noisy
+    # fields underestimate Y_0^sample, the sample dual is overestimated
+    # far from the origin, and a monotone-FOC trail can walk into a
+    # spurious large-entropy basin (observed at fine levels). The dual
+    # is the quantity being maximized; require it to behave like one.
+    dual_slack: float = 1.0e-4
     delta_phi_max: float = 2.0  # trust region: exact sup-norm change per step
     min_ess_fraction: float = 0.05  # ESS backtracking threshold
     max_backtracks: int = 6
@@ -152,6 +160,11 @@ class ReducedMomentMapCalibrator:
             """Gradient of the (possibly regularized) sample dual."""
             return targets - m - sigma2 * (s_gram @ lam)
 
+        def dual_value(lam: np.ndarray, sol: BSDESolution) -> float:
+            """(Regularized) sample dual D^sigma(lambda)."""
+            return (float(lam @ targets) - sol.y0_sample
+                    - 0.5 * sigma2 * float(lam @ (s_gram @ lam)))
+
         def implicit_jacobian(lam: np.ndarray, m: np.ndarray,
                               sol: BSDESolution) -> np.ndarray:
             """Exact-on-sample dm/dlambda at the current solution:
@@ -162,28 +175,46 @@ class ReducedMomentMapCalibrator:
             wv = _softmax(psi_T @ lam - self._dynamic_offset(sol, paths))
             return psi_T.T @ (dl * wv[:, None]) - np.outer(m, wv @ dl)
 
-        # Stage 1: exact static exponential-family fit (marginal-only tilt).
+        # Stage 1: exact static exponential-family fit (marginal-only tilt),
+        # restricted to the identifiable subspace of the reduced Jacobian
+        # at the starting point. The restriction is not cosmetic: the
+        # static problem sees near-replicable directions as perfectly
+        # identifiable (full static curvature), so the unrestricted fit
+        # loads them with multipliers amplified by 1/(1 - gamma) — pure
+        # gauge at this level's resolution (the hedge cancels them; the
+        # law barely moves), but *poison* as a warm start, because gauge
+        # is resolution-dependent and the finer level no longer cancels
+        # it (observed: a clean H ~ 1e-3 level embedded into H ~ 1.9
+        # garbage). Restricting the static step keeps every returned
+        # multiplier a minimal-gauge representative by construction.
         if warm_start is None:
             lam0 = np.zeros(d)
-            lam = self._static_newton(lam0, targets, psi_T, np.zeros(n_paths),
-                                      s_gram, sigma2)
+            sol_ref = self._solve(level, lam0, paths, context)
+            n_s_ref = self._dynamic_offset(sol_ref, paths)
+            dual0 = 0.0  # zero potential: Y_0^sample = 0 exactly
         else:
             # Warm-started levels still need stage 1 for the *new*
             # directions (embedded coefficients are zero there): freeze the
-            # dynamic offset N^S at the warm start and run the exact static
-            # Newton on the offset exponential family from it.
+            # dynamic offset N^S at the warm start and run the restricted
+            # static Newton on the offset exponential family from it.
             lam0 = np.asarray(warm_start, dtype=float).copy()
-            sol_w = self._solve(level, lam0, paths, context)
-            lam = self._static_newton(lam0, targets, psi_T,
-                                      self._dynamic_offset(sol_w, paths),
-                                      s_gram, sigma2)
-        # The static stage has no dynamic feedback, so on barely
-        # identifiable directions (§6.3) it can run far: apply the same
-        # exact sup-norm trust region as stage 2 to its total move, then
-        # backtrack the whole move toward the start until the ESS survives
-        # and the Picard fixed point holds (an overconfident static tilt
-        # at low path counts can otherwise collapse the weights before
-        # Gauss-Newton ever sees a usable state).
+            sol_ref = self._solve(level, lam0, paths, context)
+            n_s_ref = self._dynamic_offset(sol_ref, paths)
+            dual0 = dual_value(lam0, sol_ref)
+        ident_proj = None
+        if self.jacobian == "implicit":
+            w_ref = _softmax(psi_T @ lam0 - n_s_ref)
+            m_ref = w_ref @ psi_T
+            j0 = implicit_jacobian(lam0, m_ref, sol_ref)
+            _, s0, vt0 = np.linalg.svd(j0)
+            v_keep = vt0[s0 > self.jac_rcond].T
+            ident_proj = v_keep @ v_keep.T
+        lam = self._static_newton(lam0, targets, psi_T, n_s_ref,
+                                  s_gram, sigma2, ident_proj)
+        # Belt over the braces: exact sup-norm trust region on the whole
+        # static move, then backtrack toward the start until the Picard
+        # fixed point holds, the ESS survives AND the sample dual has not
+        # decreased below the starting value.
         dphi0 = sup_phi(lam - lam0)
         if dphi0 > self.delta_phi_max:
             lam = lam0 + (lam - lam0) * (self.delta_phi_max / dphi0)
@@ -193,7 +224,8 @@ class ReducedMomentMapCalibrator:
             except ValueError:
                 lam = lam0 + 0.5 * (lam - lam0)
                 continue
-            if ess >= self.min_ess_fraction:
+            if (ess >= self.min_ess_fraction
+                    and dual_value(lam, sol) >= dual0 - self.dual_slack):
                 break
             lam = lam0 + 0.5 * (lam - lam0)
         else:
@@ -223,6 +255,7 @@ class ReducedMomentMapCalibrator:
         status = "stage-1 static fit sufficient" if converged else ""
         J = None
         mu = self.lm_mu0
+        dual_cur = dual_value(lam, sol)
         while not converged and n_outer < self.max_outer:
             n_outer += 1
             if self.jacobian == "implicit":
@@ -238,16 +271,21 @@ class ReducedMomentMapCalibrator:
                     m_j, _, _ = moments_of(lam + eps * e)
                     J[:, j] = (m_j - m) / eps
             A = J + sigma2 * s_gram  # FOC Jacobian (up to sign)
-            ata = A.T @ A
-            atr = A.T @ grad
-            # LM inner loop: a candidate is accepted only if the FOC
-            # residual strictly decreases AND the ESS survives; failures
-            # (including Picard fixed-point failures at the candidate)
-            # raise the damping and retry.
+            u_a, s_a, vt_a = np.linalg.svd(A)
+            keep_a = s_a > self.jac_rcond
+            utr = u_a[:, keep_a].T @ grad
+            # LM inner loop restricted to the identifiable subspace: the
+            # step is damped where the reduced Jacobian is informative and
+            # *zero* along unidentifiable directions — moving there is a
+            # random walk on field noise and, left free, LM will follow a
+            # monotone FOC trail into a spurious large-entropy basin
+            # (observed at fine levels). A candidate is accepted only if
+            # the FOC residual strictly decreases AND the ESS survives;
+            # failures (including Picard fixed-point failures at the
+            # candidate) raise the damping and retry.
             accepted = False
             for _ in range(self.max_backtracks + 1):
-                lhs = ata + mu * np.eye(d)
-                step = np.linalg.solve(lhs, atr)
+                step = vt_a[keep_a].T @ (s_a[keep_a] / (s_a[keep_a] ** 2 + mu) * utr)
                 dphi = sup_phi(step)
                 if dphi > self.delta_phi_max:
                     step *= self.delta_phi_max / dphi
@@ -257,19 +295,22 @@ class ReducedMomentMapCalibrator:
                     mu *= 4.0
                     continue
                 gnorm_new = float(np.linalg.norm(foc(lam + step, m_new)))
-                if ess_new >= self.min_ess_fraction and gnorm_new < gnorm:
+                dual_new = dual_value(lam + step, sol_new)
+                if (ess_new >= self.min_ess_fraction and gnorm_new < gnorm
+                        and dual_new >= dual_cur - self.dual_slack):
                     accepted = True
                     mu = max(mu / 3.0, 1e-8)
                     break
                 mu *= 4.0
             if not accepted:
                 r_id, r_un, rank = ident_split(J, grad)
-                status = ("stopped: no residual-decreasing, ESS-preserving "
-                          f"LM step (identifiable residual {r_id:.3e}, "
+                status = ("stopped: no dual-ascending, residual-decreasing, "
+                          f"ESS-preserving LM step (identifiable residual {r_id:.3e}, "
                           f"unidentifiable {r_un:.3e}, rank {rank}/{d})")
                 break
             lam = lam + step
             m, ess, sol = m_new, ess_new, sol_new
+            dual_cur = dual_new
             grad = foc(lam, m)
             gnorm = float(np.linalg.norm(grad))
             if gnorm < self.moment_tolerance:
@@ -319,14 +360,21 @@ class ReducedMomentMapCalibrator:
 
     def _static_newton(self, lam0: np.ndarray, targets: np.ndarray,
                        psi_T: np.ndarray, n_s: np.ndarray,
-                       s_gram: np.ndarray, sigma2: float) -> np.ndarray:
+                       s_gram: np.ndarray, sigma2: float,
+                       ident_proj: np.ndarray | None = None) -> np.ndarray:
         """Exact Newton on the strictly concave offset exponential family,
-        Sobolev-regularized when sigma2 > 0."""
+        Sobolev-regularized when sigma2 > 0. With ``ident_proj`` (the
+        projector onto the identifiable subspace of the reduced Jacobian
+        at the starting point) every step — and the convergence check —
+        is restricted to that subspace: the static stage must never load
+        gauge directions the dynamics will cancel."""
         lam = lam0.copy()
         for _ in range(self.max_newton):
             w = _softmax(psi_T @ lam - n_s)
             mean = w @ psi_T
             grad = targets - mean - sigma2 * (s_gram @ lam)
+            if ident_proj is not None:
+                grad = ident_proj @ grad
             if float(np.linalg.norm(grad)) < self.gradient_tolerance:
                 break
             centered = psi_T - mean
@@ -337,6 +385,8 @@ class ReducedMomentMapCalibrator:
                 step = np.linalg.solve(hess, grad)
             except np.linalg.LinAlgError:
                 step = np.linalg.lstsq(hess, grad, rcond=None)[0]
+            if ident_proj is not None:
+                step = ident_proj @ step
             # Backtracking on the concave objective.
             g0 = (float(lam @ targets) - _log_mean_exp(psi_T @ lam - n_s)
                   - 0.5 * sigma2 * float(lam @ (s_gram @ lam)))
