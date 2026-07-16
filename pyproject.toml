@@ -10,7 +10,13 @@ requires-python = ">=3.10"
 dependencies = []
 
 [project.optional-dependencies]
-dev = ["pytest"]
+# Legacy facility is pure-stdlib: `dependencies = []` stays empty and
+# `import otf` / `import otf.ssfv` must never require NumPy or PyTorch.
+# The SSFV numerical core lives behind these extras (docs/DECISIONS.md D2).
+numerical = ["numpy", "scipy"]
+torch = ["torch"]
+data = ["pandas", "pyarrow", "duckdb"]
+dev = ["pytest", "hypothesis", "ruff", "mypy"]
 lseg = ["lseg-data", "pandas"]
 
 [tool.setuptools.packages.find]

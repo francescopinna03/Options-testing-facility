@@ -1,0 +1,54 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  # Lane 1 (DECISIONS.md D2): pure-stdlib environment. Verifies the import
+  # discipline (`import otf` / `import otf.ssfv` must never require NumPy)
+  # and runs the legacy suite; SSFV numerical tests skip themselves via
+  # importorskip.
+  legacy-minimal:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install -e . pytest
+      - name: stdlib import discipline
+        run: |
+          python -c "
+          import sys
+          import otf, otf.ssfv, otf.ssfv.types, otf.ssfv.interfaces, otf.ssfv.config
+          assert 'numpy' not in sys.modules, 'stdlib import pulled in numpy'
+          "
+      - run: python -m pytest -q
+
+  # Lane 2 (D2): the SSFV numerical core on CPU. SSFV_SLOW scaling probes
+  # stay off here; they belong to the scheduled large lane.
+  ssfv-numerical:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install -e ".[numerical,dev]"
+      - run: python -m pytest -q
+
+  # Non-blocking hygiene: lint and types report but do not gate the merge
+  # until the baseline is clean.
+  lint:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install -e ".[numerical,dev]"
+      - run: ruff check otf tests
+      - run: mypy otf/ssfv --ignore-missing-imports
