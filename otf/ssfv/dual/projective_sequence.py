@@ -81,8 +81,10 @@ class ProjectiveSequence:
                                       warm_start=warm, context=context)
             sol = self.calibrator.solve_at(level, fit.lam, paths, context)
             psi = family.evaluate_normalized(level, paths.x[:, -1])
-            bundle, post = build_certificate_bundle(paths, sol, fit, psi, targets,
-                                                    previous=prev_cert)
+            bundle, post = build_certificate_bundle(
+                paths, sol, fit, psi, targets, previous=prev_cert,
+                identifiable_sv_floor=self.calibrator.jac_rcond,
+            )
 
             runs.append(LevelRun(level=level, fit=fit, bundle=bundle, posterior=post))
             prev_level, prev_lam = level, fit.lam

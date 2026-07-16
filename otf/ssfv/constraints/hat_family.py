@@ -235,6 +235,41 @@ class NestedHatFamily:
         )
         return replace(level, normalization=nm)
 
+    # -- Sobolev geometry (M2, D12) ---------------------------------------------
+
+    def sobolev_gram(self, level: ConstraintLevel) -> np.ndarray:
+        """Exact H^1 Gram matrix of the *normalized* columns:
+
+            S = I + W^T D_raw W,
+            D_raw[i, j] = int_R psi'_i psi'_j dk,
+
+        where I is the L^2(Q0-pilot) part (the normalized columns are
+        exactly orthonormal on the pilot sample by construction) and the
+        derivative part is computed exactly: every column is piecewise
+        linear with breakpoints in ``level.knots``, so its derivative is
+        piecewise constant on the knot intervals and the integral is a
+        finite sum. Ramps saturate outside their rise interval and hats
+        vanish, so D_raw is finite even though the tail tests are not
+        L^2(dk).
+
+        The mixed measure is deliberate (D12): the L^2 part under the
+        prior marginal keeps the scale of well-observed directions; the
+        derivative part under Lebesgue penalizes roughness *everywhere*,
+        including regions the prior barely visits — which is exactly the
+        relative-interior failure mode (§6.3) the regularization must
+        bound.
+        """
+        nm = level.normalization
+        if nm is None:
+            raise ValueError("level is not normalized; call normalize() first")
+        knots = np.asarray(level.knots, dtype=float)
+        vals = self.evaluate(level, knots)  # (n_knots, d_raw)
+        dk = np.diff(knots)  # (n_intervals,)
+        slopes = np.diff(vals, axis=0) / dk[:, None]  # exact per interval
+        d_raw = (slopes * dk[:, None]).T @ slopes  # int psi'_i psi'_j dk
+        w = nm.transform
+        return np.eye(w.shape[1]) + w.T @ d_raw @ w
+
     # -- targets ---------------------------------------------------------------
 
     def targets_from_sample(self, level: ConstraintLevel, k_market_sample: np.ndarray) -> np.ndarray:

@@ -44,6 +44,11 @@ def main(argv=None) -> int:
                     metavar="STEPS",
                     help="also emit dt_convergence_table.json across these "
                          "step counts (same horizon, same DGP potential)")
+    ap.add_argument("--sobolev-sigma2", type=float, default=0.0,
+                    help="Sobolev regularization strength sigma^2 (M2, D12)")
+    ap.add_argument("--jacobian", choices=["implicit", "fd"], default="implicit",
+                    help="stage-2 Jacobian backend (implicit fixed-point "
+                         "differentiation, or finite differences)")
     args = ap.parse_args(argv)
 
     out = pathlib.Path(args.out)
@@ -60,7 +65,9 @@ def main(argv=None) -> int:
 
     family = NestedHatFamily(k_min=-0.5, k_max=0.5, base_dim=4)
     solver = PicardHopfColeSolver().for_prior(prior)
-    cal = ReducedMomentMapCalibrator(family, solver=solver)
+    cal = ReducedMomentMapCalibrator(family, solver=solver,
+                                     sobolev_sigma2=args.sobolev_sigma2,
+                                     jacobian=args.jacobian)
 
     # DGP 2: known potential at the finest requested level, rescaled so
     # sup|Phi*| equals --potential-scale exactly.

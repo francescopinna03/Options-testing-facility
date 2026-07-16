@@ -79,11 +79,16 @@ def build_certificate_bundle(
     psi_normalized: np.ndarray,
     targets: np.ndarray,
     previous: PreviousLevelData | None = None,
+    identifiable_sv_floor: float = 3.0e-2,
 ) -> tuple[CertificateBundle, ReweightedPosterior]:
     """Assemble the §12 bundle for one calibrated level.
 
     ``previous`` carries the preceding projective level on the same path
     batch, enabling the Cauchy certificate; None for the first level.
+    ``identifiable_sv_floor`` is the absolute singular-value floor (in
+    static-curvature units) below which reduced directions are declared
+    unidentifiable — pass the calibrator's ``jac_rcond`` so the
+    certificate and the optimizer agree on the split.
     """
     post = ReweightedPosterior(paths, solution)
     h_lr = post.entropy_lr()
@@ -159,11 +164,30 @@ def build_certificate_bundle(
     centered = psi_normalized - m
     jac = centered.T @ (centered * w[:, None])
     eig = np.linalg.eigvalsh(jac)
+    # True reduced (Schur) spectrum when the fit carries the
+    # implicit-differentiation Jacobian dm/dlambda: dynamic cancellation
+    # included, so near-zero singular values ARE the gamma -> 1
+    # replicable directions. The FOC residual is split on the same
+    # threshold the optimizer used.
+    red_kw: dict = {}
+    if fit.reduced_jacobian is not None:
+        u, s, _ = np.linalg.svd(np.asarray(fit.reduced_jacobian))
+        keep = s > identifiable_sv_floor
+        r = np.asarray(fit.gradient, dtype=float)
+        r_id = u[:, keep] @ (u[:, keep].T @ r)
+        red_kw = {
+            "reduced_sv_min": float(s[-1]),
+            "reduced_sv_max": float(s[0]),
+            "identifiable_dim": int(keep.sum()),
+            "identifiable_residual_norm": float(np.linalg.norm(r_id)),
+            "unidentifiable_residual_norm": float(np.linalg.norm(r - r_id)),
+        }
     conditioning = ConditioningCertificate(
         eigen_min=float(eig[0]),
         eigen_max=float(eig[-1]),
         condition_number=float(eig[-1] / max(eig[0], 1e-300)),
         n_removed_directions=psi_normalized.shape[1] - int((eig > 1e-12 * eig[-1]).sum()),
+        **red_kw,
     )
 
     diagnostics = {

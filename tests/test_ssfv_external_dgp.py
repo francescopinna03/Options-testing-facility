@@ -64,8 +64,11 @@ def run_external(n_paths):
         lvl, paths_tgt.x[:, -1])
 
     solver = PicardHopfColeSolver().for_prior(PRIOR)
+    # Implicit-differentiation Jacobians make outer iterations cheap;
+    # Levenberg-Marquardt takes many small steps along the weakly
+    # identifiable directions, so the budget is generous.
     cal = ReducedMomentMapCalibrator(FAMILY, solver=solver,
-                                     moment_tolerance=5e-3, max_outer=8)
+                                     moment_tolerance=5e-3, max_outer=40)
     ctx = cal.build_context(lvl, paths_cal)
     fit = cal.fit(lvl, targets, paths_cal, context=ctx)
 

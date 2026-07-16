@@ -278,7 +278,7 @@ class PicardHopfColeSolver:
     def _backward_pass(self, paths: PathBatch, context: PicardContext,
                        kill: np.ndarray, h_T: np.ndarray, h_floor: float,
                        h_cap: float, zs_cap: float, zp_cap: float,
-                       sqv: np.ndarray, dt: float):
+                       sqv: np.ndarray, dt: float, capture: bool = False):
         """One linear killed-FK backward propagation at a frozen killing
         field: h_j = clip(E_j[h_{j+1}]) * kill_j, with score fields
         extracted along the way.
@@ -300,6 +300,15 @@ class PicardHopfColeSolver:
         n_clipped = 0
         n_score_capped = 0
         cv_num = cv_den = 0.0
+        # Linearization capture (implicit differentiation, M2 D12): the
+        # post-clip conditional mean, the clip/cap active sets and the
+        # extracted field — everything the tangent sweep needs beyond the
+        # operators already cached in the context.
+        cap_data = {
+            "ehc": np.empty((n_paths, n_steps)),
+            "clip_ok": np.empty((n_paths, n_steps), dtype=bool),
+            "cap_ok_s": np.ones((n_paths, n_steps), dtype=bool),
+        } if capture else None
         for j in range(n_steps - 1, -1, -1):
             target = h_path[:, j + 1]
             if j == 0:
@@ -313,6 +322,9 @@ class PicardHopfColeSolver:
                 zp_new[:, 0] = hy_incr / eh
                 h0v = eh * kill[:, 0]
                 h_path[:, 0] = np.clip(h0v, h_floor, h_cap)
+                if capture:
+                    cap_data["ehc"][:, 0] = eh
+                    cap_data["clip_ok"][:, 0] = (h0v > h_floor) & (h0v < h_cap)
             else:
                 F = context.features[j]
                 eh = np.empty(n_paths)
@@ -356,7 +368,116 @@ class PicardHopfColeSolver:
                 zs_new[:, j] = np.clip(zs_raw, -zs_cap, zs_cap)
                 zp_new[:, j] = np.clip(zp_raw, -zp_cap, zp_cap)
                 h_path[:, j] = ehc * kill[:, j]
+                if capture:
+                    cap_data["ehc"][:, j] = ehc
+                    cap_data["clip_ok"][:, j] = (eh > h_floor) & (eh < h_cap)
+                    cap_data["cap_ok_s"][:, j] = np.abs(zs_raw) <= zs_cap
+        if capture:
+            return h_path, zs_new, zp_new, (n_clipped, n_score_capped, cv_num, cv_den), cap_data
         return h_path, zs_new, zp_new, (n_clipped, n_score_capped, cv_num, cv_den)
+
+    # -- implicit differentiation (M2, D12) --------------------------------------
+
+    def dn_s_dlam(self, paths: PathBatch, potential, psi_dirs: np.ndarray,
+                  context: PicardContext, solution: BSDESolution,
+                  n_iter: int = 12, tol: float = 1.0e-4) -> np.ndarray:
+        """Pathwise d N^S_T / d lambda_i by implicit differentiation of the
+        Picard fixed point at the returned frozen-field solution.
+
+        ``psi_dirs`` (n_paths, d) holds the terminal values of the family
+        directions (d Phi / d lambda_i at the terminal). The tangent of
+        the fixed point Z-bar = Extract(h(Z-bar)) solves the *linear*
+        equation dZ = L dZ + b, where b propagates the terminal
+        perturbation psi_i * e^Phi through the frozen killed-FK backward
+        pass and L enters through the killing weight
+        d kill_j = -dt * Z-bar_j * dZ_j * kill_j. It is solved by the same
+        under-relaxed iteration as the field itself (the linearized map
+        inherits the damped contraction). Regression operators are the
+        fixed linear maps cached in the context; clip/cap active sets are
+        frozen at the solution — the tangent is exact modulo those
+        measure-zero kinks. Only the price-channel field is differentiated:
+        kill and N^S involve Z^S alone.
+
+        Returns dNS with shape (n_paths, d): row p is d N^S_T(path p) / d lambda.
+        """
+        if self.score_from != "increments":
+            raise NotImplementedError("implicit differentiation implemented "
+                                      "for the increments score route only")
+        if context.batch_hash != paths.batch_hash:
+            raise ValueError("picard context was built for a different path batch")
+        n_paths, n_steps = paths.n_paths, paths.n_steps
+        dt = float(paths.times[1] - paths.times[0])
+        d = psi_dirs.shape[1]
+
+        sup_fn = getattr(potential, "sup_norm_exact", potential.sup_norm_bound)
+        b_sup = float(sup_fn())
+        h_cap = np.exp(b_sup)
+        h_floor = np.exp(-b_sup - self.h_floor_log)
+        phi = potential.terminal_value(paths.x[:, -1])
+        h_T = np.exp(phi)
+        sqv = np.sqrt(np.maximum(paths.v[:, :-1], 0.0))
+        lip = float(getattr(potential, "lipschitz_bound", sup_fn)())
+        vbar = float(np.quantile(paths.v, 0.999)) ** 0.5
+        zs_cap = self.score_cap_multiplier * max(vbar, 1e-3) * (1.0 + abs(self.rho) * self.xi) * max(lip, 1e-12)
+        zp_cap = self.score_cap_multiplier * self.xi * max(lip, 1e-12)
+
+        zs_bar = solution.z[:, :, 0]
+        kill = np.exp(-0.5 * zs_bar**2 * dt)
+        _, zs_eval, _, _, cap = self._backward_pass(
+            paths, context, kill, h_T, h_floor, h_cap, zs_cap, zp_cap,
+            sqv, dt, capture=True,
+        )
+        ehc, clip_ok, cap_ok = cap["ehc"], cap["clip_ok"], cap["cap_ok_s"]
+        dw_s = paths.d_w[:, :, 0]
+        dh_T = psi_dirs * h_T[:, None]  # (n_paths, d)
+
+        def tangent_sweep(dzs_field: np.ndarray) -> np.ndarray:
+            """One linear backward pass; returns the extracted tangent field."""
+            dkill = -dt * zs_bar[:, :, None] * dzs_field * kill[:, :, None]
+            dzs_out = np.empty((n_paths, n_steps, d))
+            dh = dh_T
+            for j in range(n_steps - 1, -1, -1):
+                if j == 0:
+                    deh = dh.mean(axis=0)  # (d,)
+                    dresid = dh - deh[None, :]
+                    dhs = (dresid * dw_s[:, 0, None]).mean(axis=0) / dt
+                    eh0 = ehc[0, 0]
+                    zs0 = zs_eval[0, 0]
+                    dzs_out[:, 0, :] = ((dhs - zs0 * deh) / eh0)[None, :]
+                    dh0 = deh[None, :] * kill[:, 0, None] + eh0 * dkill[:, 0, :]
+                    dh = dh0 * clip_ok[:, 0, None]
+                else:
+                    F = context.features[j]
+                    deh = np.empty((n_paths, d))
+                    dgs = np.empty((n_paths, d))
+                    for f, mask in enumerate(context.fold_masks):
+                        gram_inv, train = context.gram_pinv[j][f]
+                        At = F[train].T
+                        dtr = dh[train]
+                        dbar = dtr.mean(axis=0)  # (d,)
+                        dcoef = gram_inv @ (At @ (dtr - dbar[None, :]))
+                        deh[mask] = dbar[None, :] + F[mask] @ dcoef
+                        dresid = dtr - dbar[None, :] - F[train] @ dcoef
+                        dgs[mask] = F[mask] @ (gram_inv @ (At @ (dresid * dw_s[train, j, None]))) / dt
+                    dehc = deh * clip_ok[:, j, None]
+                    dzs_out[:, j, :] = cap_ok[:, j, None] * (
+                        (dgs - zs_eval[:, j, None] * dehc) / ehc[:, j, None]
+                    )
+                    dh = dehc * kill[:, j, None] + ehc[:, j, None] * dkill[:, j, :]
+            return dzs_out
+
+        dzs = np.zeros((n_paths, n_steps, d))
+        omega = self.picard_damping
+        for it in range(n_iter):
+            dzs_new = tangent_sweep(dzs)
+            delta = float(np.sqrt(np.mean((dzs_new - dzs) ** 2)))
+            scale = float(np.sqrt(np.mean(dzs_new**2))) + 1e-300
+            w_relax = 1.0 if it == 0 else omega
+            dzs = (1.0 - w_relax) * dzs + w_relax * dzs_new
+            if delta < tol * scale:
+                break
+
+        return (dzs * dw_s[:, :, None]).sum(axis=1)
 
     def projector(self) -> DiffusionMartingaleProjector:
         return DiffusionMartingaleProjector()

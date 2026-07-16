@@ -141,6 +141,55 @@ def test_dual_calibration_recovers_the_law(paths, level, solver, context, lam_st
     assert abs(post_hat.entropy_lr() - post_star.entropy_lr()) < 2e-3
 
 
+def test_implicit_jacobian_matches_finite_differences(paths, level, solver, context, lam_star, star):
+    """M2: dm/dlambda by implicit differentiation of the Picard fixed
+    point vs central finite differences. Agreement is asserted on
+    columns where the clip/cap active sets are quiet (the tangent
+    freezes them; FD steps across them)."""
+    sol, _ = star
+    psi_T = FAMILY.evaluate_normalized(level, paths.x[:, -1])
+    pot = LambdaPotential(FAMILY, level, lam_star)
+    dns = solver.dn_s_dlam(paths, pot, psi_T, context, sol)
+    dl = psi_T - dns
+    ns0 = (sol.z[:, :, 0] * paths.d_w[:, :, 0]).sum(axis=1)
+    e = psi_T @ lam_star - ns0
+    w = np.exp(e - e.max())
+    w /= w.sum()
+    m0 = w @ psi_T
+    j_imp = psi_T.T @ (dl * w[:, None]) - np.outer(m0, w @ dl)
+
+    def moments(lam):
+        s = solver.solve(paths, LambdaPotential(FAMILY, level, lam), context)
+        ns = (s.z[:, :, 0] * paths.d_w[:, :, 0]).sum(axis=1)
+        le = psi_T @ lam - ns
+        wv = np.exp(le - le.max())
+        wv /= wv.sum()
+        return wv @ psi_T
+
+    eps = 1e-3
+    for j in (2, 3):
+        ej = np.zeros(level.dim)
+        ej[j] = eps
+        col_fd = (moments(lam_star + ej) - moments(lam_star - ej)) / (2 * eps)
+        rel = np.abs(j_imp[:, j] - col_fd).max() / max(np.abs(col_fd).max(), 1e-12)
+        assert rel < 5e-2, f"column {j}: rel error {rel:.2e}"
+
+
+def test_sobolev_gram_and_null_targets(paths, level, solver, context):
+    """M2: the Sobolev Gram is symmetric positive definite with unit L2
+    block, and a regularized fit on null targets still returns the prior
+    (the penalty vanishes at lambda = 0, so exactness survives)."""
+    S = FAMILY.sobolev_gram(level)
+    np.testing.assert_allclose(S, S.T, atol=1e-10)
+    assert np.linalg.eigvalsh(S)[0] >= 1.0 - 1e-8  # I + PSD derivative part
+    psi = FAMILY.evaluate_normalized(level, paths.x[:, -1])
+    targets = psi.mean(axis=0)
+    cal = ReducedMomentMapCalibrator(FAMILY, solver=solver, sobolev_sigma2=1e-3)
+    fit = cal.fit(level, targets, paths, context=context)
+    assert fit.converged
+    assert float(np.abs(fit.lam).max()) < 1e-3
+
+
 def test_dt_refinement_no_first_order_bias_visible(level, solver, lam_star):
     """The score ratio gs/ehc is a *first-order* discretization of the
     Feynman-Kac score (kill = 1 + O(dt)), classified as such — never an

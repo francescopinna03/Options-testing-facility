@@ -68,12 +68,41 @@ class ReducedMomentMapCalibrator:
     family: NestedHatFamily
     solver: Any = None
     gradient_tolerance: float = 1.0e-9  # stage-1 Newton tolerance
-    moment_tolerance: float = 1.0e-3  # stage-2 stop: ||a - m(lambda)||
+    moment_tolerance: float = 1.0e-3  # stage-2 stop: ||FOC residual||
+    # Sobolev regularization strength sigma^2 (M2, D12). The regularized
+    # dual is D^sigma(lambda) = lambda^T a - Y_0^sample - sigma^2/2 *
+    # lambda^T S lambda with S the exact H^1 Gram of the normalized
+    # family; the stage-2 root problem becomes the regularized FOC
+    #     a - m(lambda) - sigma^2 S lambda = 0.
+    # Zero disables it exactly (M1 behavior). The *raw* moment residual
+    # a - m is still reported separately — the duality-certificate defect
+    # decomposition quantifies what the regularization gave up:
+    # moment_defect ~ -sigma^2 lambda^T S lambda at the optimum.
+    sobolev_sigma2: float = 0.0
+    # Jacobian backend (M2, D12): "implicit" differentiates the Picard
+    # fixed point (exact on the sample modulo frozen clip/cap sets, one
+    # tangent solve for all directions — an order of magnitude faster
+    # than FD and free of finite-difference noise in the weakly
+    # identifiable directions); "fd" keeps the forward-difference probe
+    # as the cross-check backend.
+    jacobian: str = "implicit"
     max_outer: int = 8  # stage-2 Gauss-Newton iterations
     max_newton: int = 50  # stage-1 iterations
     ridge: float = 1.0e-10  # stage-1 Hessian regularization
     fd_phi: float = 0.05  # FD perturbation, in potential sup-norm units
-    jac_rcond: float = 3.0e-2  # relative singular cutoff of the moment Jacobian
+    # Identifiability floor for singular values of the reduced Jacobian,
+    # in *natural units* (the normalized basis is orthonormal on the
+    # pilot sample, so the static curvature is the identity and singular
+    # values of dm/dlambda measure how much of a static unit response
+    # survives dynamic cancellation). Directions below the floor are
+    # declared unidentifiable at this sample size — the §10.3
+    # near-replicable directions — and convergence is asserted on the
+    # identifiable subspace, with the unidentifiable remainder reported,
+    # never chased. NOTE: absolute, not relative to the largest singular
+    # value — one strongly hedged direction can have |dm/dlambda| >> 1
+    # and a relative cutoff would silently discard everything else.
+    jac_rcond: float = 3.0e-2
+    lm_mu0: float = 1.0e-2  # initial Levenberg-Marquardt damping
     delta_phi_max: float = 2.0  # trust region: exact sup-norm change per step
     min_ess_fraction: float = 0.05  # ESS backtracking threshold
     max_backtracks: int = 6
@@ -107,6 +136,8 @@ class ReducedMomentMapCalibrator:
 
         psi_T = self.family.evaluate_normalized(level, paths.x[:, -1])  # (n_paths, d)
         n_paths = paths.n_paths
+        sigma2 = self.sobolev_sigma2
+        s_gram = self.family.sobolev_gram(level) if sigma2 > 0.0 else np.zeros((d, d))
 
         def sup_phi(coeffs: np.ndarray) -> float:
             return LambdaPotential(self.family, level, coeffs).sup_norm_exact()
@@ -117,10 +148,25 @@ class ReducedMomentMapCalibrator:
             ess_frac = 1.0 / (float((w**2).sum()) * n_paths)
             return w @ psi_T, ess_frac, sol
 
+        def foc(lam: np.ndarray, m: np.ndarray) -> np.ndarray:
+            """Gradient of the (possibly regularized) sample dual."""
+            return targets - m - sigma2 * (s_gram @ lam)
+
+        def implicit_jacobian(lam: np.ndarray, m: np.ndarray,
+                              sol: BSDESolution) -> np.ndarray:
+            """Exact-on-sample dm/dlambda at the current solution:
+            J[k,i] = Cov_w(psi_k, psi_i - dN^S_i)."""
+            pot = LambdaPotential(self.family, level, lam)
+            dns = self.solver.dn_s_dlam(paths, pot, psi_T, context, sol)
+            dl = psi_T - dns
+            wv = _softmax(psi_T @ lam - self._dynamic_offset(sol, paths))
+            return psi_T.T @ (dl * wv[:, None]) - np.outer(m, wv @ dl)
+
         # Stage 1: exact static exponential-family fit (marginal-only tilt).
         if warm_start is None:
             lam0 = np.zeros(d)
-            lam = self._static_newton(lam0, targets, psi_T, np.zeros(n_paths))
+            lam = self._static_newton(lam0, targets, psi_T, np.zeros(n_paths),
+                                      s_gram, sigma2)
         else:
             # Warm-started levels still need stage 1 for the *new*
             # directions (embedded coefficients are zero there): freeze the
@@ -129,7 +175,8 @@ class ReducedMomentMapCalibrator:
             lam0 = np.asarray(warm_start, dtype=float).copy()
             sol_w = self._solve(level, lam0, paths, context)
             lam = self._static_newton(lam0, targets, psi_T,
-                                      self._dynamic_offset(sol_w, paths))
+                                      self._dynamic_offset(sol_w, paths),
+                                      s_gram, sigma2)
         # The static stage has no dynamic feedback, so on barely
         # identifiable directions (§6.3) it can run far: apply the same
         # exact sup-norm trust region as stage 2 to its total move, then
@@ -153,69 +200,115 @@ class ReducedMomentMapCalibrator:
             lam = lam0
             m, ess, sol = moments_of(lam)
 
-        # Stage 2: Gauss-Newton on the field-refreshed moment map.
-        grad = targets - m
+        # Stage 2: Levenberg-Marquardt on the (regularized) FOC of the
+        # field-refreshed moment map: a - m(lambda) - sigma^2 S lambda = 0.
+        # LM replaces the truncated pseudo-inverse: weakly identifiable
+        # directions (near-replicable, gamma -> 1) are *damped*, not cut,
+        # and the damping adapts to the strong nonlinearity the dynamic
+        # feedback induces along them.
+        def ident_split(J: np.ndarray, r: np.ndarray) -> tuple[float, float, int]:
+            """Residual norms on/off the identifiable subspace of the
+            reduced Jacobian (singular values above the absolute floor)."""
+            u, s, _ = np.linalg.svd(J)
+            keep = s > self.jac_rcond
+            r_id = u[:, keep] @ (u[:, keep].T @ r)
+            return (float(np.linalg.norm(r_id)),
+                    float(np.linalg.norm(r - r_id)), int(keep.sum()))
+
+        grad = foc(lam, m)
         gnorm = float(np.linalg.norm(grad))
         converged = gnorm < self.moment_tolerance
+        ident_note = ""
         n_outer = 0
         status = "stage-1 static fit sufficient" if converged else ""
+        J = None
+        mu = self.lm_mu0
         while not converged and n_outer < self.max_outer:
             n_outer += 1
-            # FD Jacobian dm/dlambda on frozen paths (deterministic solver).
-            J = np.empty((d, d))
-            for j in range(d):
-                e = np.zeros(d)
-                e[j] = 1.0
-                eps = self.fd_phi / max(sup_phi(e), 1e-12)
-                m_j, _, _ = moments_of(lam + eps * e)
-                J[:, j] = (m_j - m) / eps
-            step = np.linalg.pinv(J, rcond=self.jac_rcond) @ grad
-            dphi = sup_phi(step)
-            if dphi > self.delta_phi_max:
-                step *= self.delta_phi_max / dphi
-            # Monotone line search + ESS backtracking: a candidate is
-            # accepted only if the moment residual strictly decreases AND
-            # the ESS survives. A solver fixed-point failure on the
-            # candidate (Picard not self-consistent at that lambda) is a
-            # rejected step, not a crash — halve and retry.
+            if self.jacobian == "implicit":
+                # Implicit differentiation of the Picard fixed point.
+                J = implicit_jacobian(lam, m, sol)
+            else:
+                # FD Jacobian dm/dlambda on frozen paths (deterministic solver).
+                J = np.empty((d, d))
+                for j in range(d):
+                    e = np.zeros(d)
+                    e[j] = 1.0
+                    eps = self.fd_phi / max(sup_phi(e), 1e-12)
+                    m_j, _, _ = moments_of(lam + eps * e)
+                    J[:, j] = (m_j - m) / eps
+            A = J + sigma2 * s_gram  # FOC Jacobian (up to sign)
+            ata = A.T @ A
+            atr = A.T @ grad
+            # LM inner loop: a candidate is accepted only if the FOC
+            # residual strictly decreases AND the ESS survives; failures
+            # (including Picard fixed-point failures at the candidate)
+            # raise the damping and retry.
             accepted = False
             for _ in range(self.max_backtracks + 1):
+                lhs = ata + mu * np.eye(d)
+                step = np.linalg.solve(lhs, atr)
+                dphi = sup_phi(step)
+                if dphi > self.delta_phi_max:
+                    step *= self.delta_phi_max / dphi
                 try:
                     m_new, ess_new, sol_new = moments_of(lam + step)
                 except ValueError:
-                    step *= 0.5
+                    mu *= 4.0
                     continue
-                gnorm_new = float(np.linalg.norm(targets - m_new))
+                gnorm_new = float(np.linalg.norm(foc(lam + step, m_new)))
                 if ess_new >= self.min_ess_fraction and gnorm_new < gnorm:
                     accepted = True
+                    mu = max(mu / 3.0, 1e-8)
                     break
-                step *= 0.5
+                mu *= 4.0
             if not accepted:
+                r_id, r_un, rank = ident_split(J, grad)
                 status = ("stopped: no residual-decreasing, ESS-preserving "
-                          "step (field noise dominates)")
+                          f"LM step (identifiable residual {r_id:.3e}, "
+                          f"unidentifiable {r_un:.3e}, rank {rank}/{d})")
                 break
             lam = lam + step
             m, ess, sol = m_new, ess_new, sol_new
-            grad = targets - m
+            grad = foc(lam, m)
             gnorm = float(np.linalg.norm(grad))
             if gnorm < self.moment_tolerance:
                 converged = True
+                break
+            # Convergence on the identifiable subspace: the remainder
+            # lives where the reduced Jacobian says this sample cannot
+            # distinguish laws — report it, never chase it (§10.3).
+            r_id, r_un, rank = ident_split(J, grad)
+            if r_id < self.moment_tolerance:
+                converged = True
+                ident_note = (f" in identifiable subspace (rank {rank}/{d}, "
+                              f"unidentifiable residual {r_un:.3e})")
+                break
         if not status:
-            status = (f"gauss-newton {'converged' if converged else 'stopped'} "
-                      f"after {n_outer} outer iterations (moment residual {gnorm:.3e})")
+            status = (f"levenberg-marquardt {'converged' if converged else 'stopped'}"
+                      f"{ident_note} after {n_outer} outer iterations "
+                      f"(foc residual {gnorm:.3e})")
 
+        # Reduced Jacobian at the returned multipliers, for the §10.3
+        # Schur/conditioning certificate. Refresh it at the final point
+        # (steps may have moved lambda since the last one was formed).
+        if self.jacobian == "implicit":
+            J = implicit_jacobian(lam, m, sol)
+
+        moment_res = targets - m
         return DualFitResult(
             level=level.n,
             lam=lam,
             dual_value=float(lam @ targets) - sol.y0_sample,
-            gradient=grad,
+            gradient=grad,  # regularized-dual gradient (FOC residual)
             gradient_norm=gnorm,
-            moment_residuals=grad,
-            moment_residual_norm=gnorm,
+            moment_residuals=moment_res,  # raw a - m, always reported
+            moment_residual_norm=float(np.linalg.norm(moment_res)),
             n_iterations=n_outer,
             converged=converged,
             status=status,
             warm_started=warm_start is not None,
+            reduced_jacobian=J,
         )
 
     # -- blocks -------------------------------------------------------------------
@@ -225,28 +318,33 @@ class ReducedMomentMapCalibrator:
         return (sol.z[:, :, 0] * paths.d_w[:, :, 0]).sum(axis=1)
 
     def _static_newton(self, lam0: np.ndarray, targets: np.ndarray,
-                       psi_T: np.ndarray, n_s: np.ndarray) -> np.ndarray:
-        """Exact Newton on the strictly concave offset exponential family."""
+                       psi_T: np.ndarray, n_s: np.ndarray,
+                       s_gram: np.ndarray, sigma2: float) -> np.ndarray:
+        """Exact Newton on the strictly concave offset exponential family,
+        Sobolev-regularized when sigma2 > 0."""
         lam = lam0.copy()
         for _ in range(self.max_newton):
             w = _softmax(psi_T @ lam - n_s)
             mean = w @ psi_T
-            grad = targets - mean
+            grad = targets - mean - sigma2 * (s_gram @ lam)
             if float(np.linalg.norm(grad)) < self.gradient_tolerance:
                 break
             centered = psi_T - mean
             hess = centered.T @ (centered * w[:, None])  # Cov_w(Psi)
+            hess += sigma2 * s_gram
             hess[np.diag_indices_from(hess)] += self.ridge
             try:
                 step = np.linalg.solve(hess, grad)
             except np.linalg.LinAlgError:
                 step = np.linalg.lstsq(hess, grad, rcond=None)[0]
             # Backtracking on the concave objective.
-            g0 = float(lam @ targets) - _log_mean_exp(psi_T @ lam - n_s)
+            g0 = (float(lam @ targets) - _log_mean_exp(psi_T @ lam - n_s)
+                  - 0.5 * sigma2 * float(lam @ (s_gram @ lam)))
             t = 1.0
             for _ in range(30):
                 cand = lam + t * step
-                g1 = float(cand @ targets) - _log_mean_exp(psi_T @ cand - n_s)
+                g1 = (float(cand @ targets) - _log_mean_exp(psi_T @ cand - n_s)
+                      - 0.5 * sigma2 * float(cand @ (s_gram @ cand)))
                 if g1 >= g0 + 1e-4 * t * float(grad @ step):
                     break
                 t *= 0.5

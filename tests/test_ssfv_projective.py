@@ -13,6 +13,7 @@ DGP 3) needs the Sobolev-regularized refinement study and is M2 scope.
 """
 
 import json
+import os
 
 import pytest
 
@@ -115,6 +116,55 @@ def test_law_recovery_against_the_dgp(setting):
     np.testing.assert_allclose(
         fine.call_prices(strikes), post_star.call_prices(strikes), atol=1e-3,
     )
+
+
+def test_schur_conditioning_certificate(setting):
+    """M2: the bundle carries the true reduced (Schur) spectrum from the
+    implicit-differentiation Jacobian — identifiable dimension, singular
+    range, and the FOC-residual split on/off the identifiable subspace."""
+    _, _, runs = setting
+    for r in runs:
+        c = r.bundle.conditioning
+        assert c.identifiable_dim is not None and c.identifiable_dim >= 1
+        assert c.reduced_sv_max is not None and c.reduced_sv_min is not None
+        assert c.reduced_sv_max >= c.reduced_sv_min >= 0.0
+        # Calibrated self-consistent DGP: the identifiable part of the
+        # residual sits at the moment tolerance.
+        assert c.identifiable_residual_norm < 6e-3
+
+
+@pytest.mark.skipif(not os.environ.get("SSFV_SLOW"),
+                    reason="4-level refinement study (~5-10 min); set SSFV_SLOW=1")
+def test_four_level_refinement_plateau(setting):
+    """M2 refinement table: with the DGP potential at level 1, the
+    calibrated entropy must *plateau* from level 1 on — levels 2 and 3
+    add constraints the DGP posterior already satisfies, so H_n increases
+    toward H* and stops there (I-projection monotonicity). Every
+    consecutive pair carries its Cauchy certificate with the exact-sample
+    decomposition."""
+    paths, post_star, _ = setting
+    solver = PicardHopfColeSolver().for_prior(PRIOR)
+    cal = ReducedMomentMapCalibrator(FAMILY, solver=solver, max_outer=4,
+                                     moment_tolerance=2e-3)
+
+    def targets_fn(level):
+        psi = FAMILY.evaluate_normalized(level, paths.x[:, -1])
+        return post_star.weights() @ psi
+
+    runs = ProjectiveSequence(cal).run(paths, [0, 1, 2, 3], targets_fn=targets_fn)
+    h = [r.bundle.entropy.h_lr for r in runs]
+    h_star = post_star.entropy_lr()
+    # Monotone up to MC noise, bounded by the DGP entropy, plateau after
+    # the DGP's own level.
+    for a, b in zip(h, h[1:]):
+        assert b >= a - 1e-3
+    assert h[3] <= h_star + 5e-3
+    assert abs(h[3] - h[1]) < 5e-3  # plateau: levels 2,3 add nothing
+    for r in runs[1:]:
+        b = r.bundle.projective
+        assert b.cauchy_slack is not None and b.cauchy_slack > -2e-3
+        assert abs(b.cauchy_identity_residual) < 1e-9
+        assert r.bundle.diagnostics["ess_fraction"] > 0.5
 
 
 def test_certificate_bundle_serializes(setting):

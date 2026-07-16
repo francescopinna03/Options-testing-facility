@@ -247,3 +247,63 @@ implemented, tested, and documented at the point of use.
     Picard context); DGP, prior and fitted calls are expectations on the
     same holdout sample. The reported law is out of sample with respect
     to the solver's regression error, not only the moment noise.
+
+## D12 — M2 numerical realization (added 2026-07-16)
+
+Order followed: Sobolev regularization, then implicit differentiation
+*before* the definitive Schur certificate (the implicit-diff Jacobian is
+the clean way to compute the true reduced Jacobian), refinement tables
+throughout. Findings are recorded as measurements.
+
+1. **Sobolev geometry.** `NestedHatFamily.sobolev_gram(level)` is the
+   exact H^1 Gram of the normalized columns, S = I + W^T D_raw W: L^2
+   block under the prior-pilot measure (identity, by orthonormality),
+   derivative block under Lebesgue (exact — derivatives are piecewise
+   constant on the knot union; ramps saturate, so S is finite despite
+   the tail tests not being L^2(dk)). The calibrator solves the
+   regularized FOC a − m(λ) − σ²Sλ = 0; σ² = 0 reproduces M1 exactly.
+   The raw moment residual stays reported; the duality-defect
+   decomposition (D11.9) quantifies what regularization gave up.
+2. **Measured: Sobolev does not cure the external-DGP stall at M1 path
+   counts.** A σ² grid on the Girsanov DGP at 8k paths shrinks H toward
+   0 and worsens holdout error monotonically: the stall is not
+   multiplier runaway (which Sobolev bounds) but a *target-attainability
+   floor* — targets from an independent batch differ from anything the
+   calibration batch can represent by O(sqrt(d/N)) ≈ 3e-2 at 8k, and
+   the fit stalls there. The refinement axis for external accuracy is
+   N (measured in D11.7), not σ².
+3. **Implicit differentiation of the Picard fixed point**
+   (`PicardHopfColeSolver.dn_s_dlam`). The tangent of the frozen-field
+   solution solves the linear equation dZ = L dZ + b (b = terminal
+   perturbation through the killed-FK pass, L = the killing-weight
+   coupling d kill = −dt·Z̄·dZ·kill); it is solved by the same damped
+   iteration as the field, with regression operators fixed (they are
+   linear maps cached in the context) and clip/cap active sets frozen at
+   the solution. Exact on the sample modulo those measure-zero kinks:
+   validated against central finite differences (5e-2 max-relative,
+   exact where the caps are quiet), 13× faster than the FD Jacobian,
+   one tangent solve for all directions. Default Jacobian backend; FD
+   retained as cross-check.
+4. **Relative pseudo-inverse cutoff was a bug in disguise.** The reduced
+   Jacobian can have one strongly hedged direction with |dm/dλ| ≫ 1
+   (measured: singular value 21 against a mid-block of 0.1–0.5); a
+   cutoff *relative to the largest singular value* then silently
+   discards every other direction and Gauss-Newton degenerates to rank
+   one — the actual mechanism behind part of the external stall.
+   `jac_rcond` is now an *absolute* floor in static-curvature units
+   (the basis is orthonormal on the pilot sample, so singular values of
+   dm/dλ measure directly what survives dynamic cancellation).
+5. **Levenberg-Marquardt replaces truncated-pinv Gauss-Newton.** Weakly
+   identifiable directions are damped, not cut; the damping adapts to
+   the strong nonlinearity (overshoot 1/(1−γ)) along them. Acceptance
+   still requires strict FOC-residual decrease AND ESS survival.
+6. **Convergence is asserted on the identifiable subspace.** Directions
+   with reduced singular value below the floor are declared
+   unidentifiable at this sample size; the FOC residual is split and
+   both parts are reported (status string + Schur certificate). Chasing
+   the unidentifiable part is exactly the field-noise chase of D10.8.
+7. **Schur certificate** (`ConditioningCertificate` extension): reduced
+   singular range, identifiable dimension, and the identifiable/
+   unidentifiable FOC-residual split, computed from the implicit-diff
+   Jacobian carried by `DualFitResult.reduced_jacobian`, with the same
+   floor the optimizer used (threaded by `ProjectiveSequence`).

@@ -241,19 +241,29 @@ class BSDESolution:
 
 @dataclass(frozen=True)
 class DualFitResult:
-    """Output of FiniteDualCalibrator.fit at one level (arch doc §3.4, §10)."""
+    """Output of FiniteDualCalibrator.fit at one level (arch doc §3.4, §10).
+
+    ``gradient`` is the gradient of the (possibly Sobolev-regularized)
+    sample dual — the FOC residual the optimizer drives to zero;
+    ``moment_residuals`` is always the *raw* a_n - m(lambda).
+    ``reduced_jacobian`` is dm/dlambda at the returned multipliers when
+    the backend provides it (implicit differentiation of the Picard
+    fixed point): the true reduced Jacobian, dynamic cancellation
+    included, feeding the §10.3 Schur/conditioning certificate.
+    """
 
     level: int
     lam: Array  # (d_n,) multipliers in the normalized basis
     dual_value: float
-    gradient: Array  # (d_n,) = a_n - E^{Q_n}[Psi_n]
+    gradient: Array  # (d_n,) regularized-dual FOC residual
     gradient_norm: float
-    moment_residuals: Array  # (d_n,)
+    moment_residuals: Array  # (d_n,) raw a_n - m(lambda)
     moment_residual_norm: float
     n_iterations: int
     converged: bool
     status: str
     warm_started: bool
+    reduced_jacobian: Array | None = None  # (d_n, d_n) dm/dlambda
 
 
 # ---------------------------------------------------------------------------
@@ -345,12 +355,30 @@ class ProjectiveCertificate:
 
 @dataclass(frozen=True)
 class ConditioningCertificate:
-    """§10.3 reduced-Jacobian conditioning (diagnostic, not existence test)."""
+    """§10.3 conditioning: static covariance spectrum plus, when the
+    calibrator provides the implicit-differentiation Jacobian, the *true
+    reduced* (Schur) spectrum.
+
+    The normalized basis is orthonormal on the pilot sample, so the
+    static curvature is the identity and the singular values of
+    dm/dlambda are directly the fraction of a unit static response that
+    survives dynamic cancellation by the semistatic hedge (gamma -> 1
+    directions have singular values -> 0). ``identifiable_dim`` counts
+    singular values above the absolute floor; the FOC residual is split
+    into its identifiable and unidentifiable parts — the latter is what
+    this sample size cannot distinguish and must be reported, never
+    chased.
+    """
 
     eigen_min: float
     eigen_max: float
     condition_number: float
     n_removed_directions: int
+    reduced_sv_min: float | None = None
+    reduced_sv_max: float | None = None
+    identifiable_dim: int | None = None
+    identifiable_residual_norm: float | None = None
+    unidentifiable_residual_norm: float | None = None
 
 
 @dataclass(frozen=True)
