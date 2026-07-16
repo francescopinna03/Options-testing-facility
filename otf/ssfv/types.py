@@ -237,11 +237,17 @@ class DualFitResult:
 
 @dataclass(frozen=True)
 class DualityCertificate:
-    """§12.1 finite duality: primal entropy vs dual value."""
+    """§12.1 finite duality: primal entropy vs dual value.
+
+    ``gap`` is the *signed* primal-dual gap H^LR - D_n. Weak duality
+    requires gap >= 0 up to Monte Carlo error: a negative value beyond
+    the MC tolerance is a violation to be explained, never folded into
+    an absolute value.
+    """
 
     primal_entropy: float
     dual_value: float
-    gap: float
+    gap: float  # signed: primal_entropy - dual_value
     moment_residual_norm: float
 
 
@@ -270,7 +276,9 @@ class ProjectiveCertificate:
     KL(Q_N | Q_n) <= H_N - H_n and ||Q_N - Q_n||_TV <= sqrt((H_N - H_n)/2).
     ``kl_direct`` is the direct estimate of the left-hand side when
     available; the observable plateau of H_n is the main convergence
-    certificate.
+    certificate. ``cauchy_slack`` is the *signed* slack
+    H_N - H_n - KL(Q_N | Q_n): the theorem requires it >= 0, and a
+    negative value beyond tolerance must fail the certificate.
     """
 
     n_prev: int | None
@@ -278,6 +286,7 @@ class ProjectiveCertificate:
     delta_h: float | None
     kl_direct: float | None
     tv_bound: float | None
+    cauchy_slack: float | None = None
 
 
 @dataclass(frozen=True)

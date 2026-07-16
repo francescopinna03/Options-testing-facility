@@ -69,7 +69,9 @@ def build_certificate_bundle(
     duality = DualityCertificate(
         primal_entropy=h_lr,
         dual_value=fit.dual_value,
-        gap=abs(h_lr - fit.dual_value),
+        # Signed gap: weak duality requires H^LR - D_n >= 0 up to MC
+        # error. A negative value is a violation, not a magnitude.
+        gap=h_lr - fit.dual_value,
         moment_residual_norm=fit.moment_residual_norm,
     )
     entropy = EntropyCertificate(h_lr=h_lr, h_en=h_en, discrepancy=abs(h_lr - h_en))
@@ -84,16 +86,22 @@ def build_certificate_bundle(
     if previous is None:
         projective = ProjectiveCertificate(
             n_prev=None, h_n=h_lr, delta_h=None, kl_direct=None, tv_bound=None,
+            cauchy_slack=None,
         )
     else:
         n_prev, h_prev, post_prev = previous
         delta_h = h_lr - h_prev
+        kl = direct_kl(post, post_prev)
         projective = ProjectiveCertificate(
             n_prev=n_prev,
             h_n=h_lr,
             delta_h=delta_h,
-            kl_direct=direct_kl(post, post_prev),
+            kl_direct=kl,
             tv_bound=float(np.sqrt(max(delta_h, 0.0) / 2.0)),
+            # Signed slack of the Cauchy inequality: the theorem requires
+            # H_N - H_n - KL(Q_N | Q_n) >= 0; negative beyond tolerance
+            # must fail the certificate.
+            cauchy_slack=delta_h - kl,
         )
 
     w = post.weights()
@@ -108,11 +116,17 @@ def build_certificate_bundle(
         n_removed_directions=psi_normalized.shape[1] - int((eig > 1e-12 * eig[-1]).sum()),
     )
 
+    # E^{Q_n}[N^S_T]: the semistatic gain is a Q_n-martingale increment sum
+    # (Girsanov moves only W^perp in the diffusion sector, so W^S stays a
+    # Q_n-Brownian motion) — its posterior mean must vanish up to MC error.
+    # This is the direct diagnosis of the primal-dual gap's dynamic term.
+    n_s_terminal = (solution.z[:, :, 0] * paths.d_w[:, :, 0]).sum(axis=1)
     diagnostics = {
         "ess_fraction": post.ess_fraction(),
         "max_weight_share": post.max_weight_share(),
         "y0": solution.y0,
         "y0_sample": solution.y0_sample,
+        "posterior_mean_semistatic_gain": float(post.weights() @ n_s_terminal),
         **{f"solver_{k}": float(v) for k, v in solution.residuals.items()},
     }
     bundle = CertificateBundle(

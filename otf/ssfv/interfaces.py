@@ -128,10 +128,11 @@ class FiniteDualCalibrator(Protocol):
 
 
 @runtime_checkable
-class PosteriorMeasure(Protocol):
-    """Posterior Q_n identified by its likelihood and transformed
-    characteristics. Supports reweighted expectations before direct
-    posterior simulation exists (arch doc §11.1)."""
+class ReweightedPosteriorMeasure(Protocol):
+    """Posterior Q_n identified by its likelihood on prior paths: the
+    reweighting representation available *before* direct posterior
+    simulation exists (arch doc §11.1). ReweightedPosterior implements
+    exactly this — no more."""
 
     def expectation(self, values: Array) -> float:
         """E^{Q_n}[G] = E^{Q^0}[L G] via stabilized log-weights."""
@@ -140,6 +141,15 @@ class PosteriorMeasure(Protocol):
     def log_weights(self) -> Array: ...
 
     def effective_sample_size(self) -> float: ...
+
+
+@runtime_checkable
+class CharacteristicPosteriorModel(Protocol):
+    """Posterior identified by its transformed local characteristics —
+    the object direct posterior simulation will need (drift feedback,
+    projected multiplier field). No implementation exists yet; kept as a
+    separate protocol so the reweighting layer does not have to pretend
+    to provide pointwise characteristics it does not have."""
 
     def characteristics(self, x: float, v: float, t: float) -> ProjectedCharacteristics: ...
 

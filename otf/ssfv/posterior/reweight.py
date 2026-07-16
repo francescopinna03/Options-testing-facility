@@ -21,7 +21,7 @@ __all__ = ["ReweightedPosterior"]
 
 @dataclass(frozen=True)
 class ReweightedPosterior:
-    """PosteriorMeasure backed by BSDE log-densities on prior paths."""
+    """ReweightedPosteriorMeasure backed by BSDE log-densities on prior paths."""
 
     paths: PathBatch
     solution: BSDESolution

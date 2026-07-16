@@ -21,7 +21,7 @@ from typing import Sequence
 import numpy as np
 
 from otf.ssfv.certificates.bundle import build_certificate_bundle
-from otf.ssfv.dual.calibrator import AlternatingDualCalibrator
+from otf.ssfv.dual.calibrator import ReducedMomentMapCalibrator
 from otf.ssfv.posterior.reweight import ReweightedPosterior
 from otf.ssfv.types import CertificateBundle, ConstraintLevel, DualFitResult, PathBatch
 
@@ -38,7 +38,7 @@ class LevelRun:
 
 @dataclass(frozen=True)
 class ProjectiveSequence:
-    calibrator: AlternatingDualCalibrator
+    calibrator: ReducedMomentMapCalibrator
 
     def run(
         self,

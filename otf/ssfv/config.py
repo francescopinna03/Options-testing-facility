@@ -9,7 +9,8 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, fields, asdict, is_dataclass
+from typing import Any, Mapping
 
 
 def derive_seed(root_seed: int, stream: str) -> int:
@@ -56,18 +57,21 @@ class ConstraintConfig:
 
 @dataclass(frozen=True)
 class BSDEConfig:
-    backend: str = "regression"
-    state_basis: str = "tensor_poly"
-    basis_degree: int = 3
+    # Reference backend actually used by the projective core (DECISIONS D10):
+    # the regression backend is the diagnostic cross-check only.
+    backend: str = "picard_hopf_cole"
+    state_basis: str = "hat_tensor"
     cross_fitting_folds: int = 2
 
 
 @dataclass(frozen=True)
 class DualConfig:
-    optimizer: str = "lbfgs"
-    gradient_tolerance: float = 1.0e-7
-    moment_tolerance: float = 1.0e-6
-    max_iterations: int = 500
+    # Actual algorithm: static Newton warm start + Gauss-Newton with
+    # pseudo-inverse on the reduced moment map (ReducedMomentMapCalibrator).
+    optimizer: str = "reduced_moment_map_gauss_newton"
+    gradient_tolerance: float = 1.0e-9
+    moment_tolerance: float = 1.0e-3
+    max_iterations: int = 8
 
 
 @dataclass(frozen=True)
@@ -90,8 +94,15 @@ class ExperimentConfig:
         payload = json.dumps(asdict(self), sort_keys=True, default=str)
         return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
-    def manifest(self, extra: dict | None = None) -> dict:
-        """Self-contained experiment manifest (arch doc §4)."""
+    def manifest(self, extra: dict | None = None,
+                 components: Mapping[str, Any] | None = None) -> dict:
+        """Self-contained experiment manifest (arch doc §4).
+
+        ``components`` maps role names to the *concrete* component
+        instances the experiment actually ran (solver, calibrator,
+        family, prior); their dataclass fields are serialized verbatim so
+        the manifest describes the executed algorithm, not a default.
+        """
         m = {
             "git_sha": _git_sha(),
             "config_hash": self.config_hash(),
@@ -101,9 +112,28 @@ class ExperimentConfig:
                 for s in ("prior", "normalization", "optimizer", "bootstrap", "posterior_validation")
             },
         }
+        if components:
+            m["components"] = {k: component_manifest(v) for k, v in components.items()}
         if extra:
             m.update(extra)
         return m
+
+
+def component_manifest(obj: Any) -> Any:
+    """JSON-safe description of a concrete component: class name plus its
+    dataclass fields. Scalars pass through, nested dataclasses recurse,
+    anything else (arrays, callables) is reported by type name — the
+    manifest must never silently misdescribe what ran."""
+    if is_dataclass(obj) and not isinstance(obj, type):
+        out: dict[str, Any] = {"class": type(obj).__name__}
+        for f in fields(obj):
+            out[f.name] = component_manifest(getattr(obj, f.name))
+        return out
+    if isinstance(obj, (bool, int, float, str)) or obj is None:
+        return obj
+    if isinstance(obj, (list, tuple)):
+        return [component_manifest(v) for v in obj]
+    return f"<{type(obj).__name__}>"
 
 
 def _git_sha() -> str:

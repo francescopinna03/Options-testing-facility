@@ -18,7 +18,7 @@ pytest.importorskip("scipy")
 
 from otf.ssfv.bsde.picard import PicardHopfColeSolver
 from otf.ssfv.constraints.hat_family import LambdaPotential, NestedHatFamily
-from otf.ssfv.dual.calibrator import AlternatingDualCalibrator
+from otf.ssfv.dual.calibrator import ReducedMomentMapCalibrator
 from otf.ssfv.posterior.reweight import ReweightedPosterior
 from otf.ssfv.prior.heston import HestonPrior
 
@@ -125,7 +125,7 @@ def test_dual_calibration_recovers_the_law(paths, level, solver, context, lam_st
     psi = FAMILY.evaluate_normalized(level, paths.x[:, -1])
     targets = post_star.weights() @ psi
 
-    cal = AlternatingDualCalibrator(FAMILY, solver=solver)
+    cal = ReducedMomentMapCalibrator(FAMILY, solver=solver)
     fit = cal.fit(level, targets, paths, context=context)
     assert fit.converged
     assert fit.moment_residual_norm < 1e-3
@@ -146,7 +146,7 @@ def test_null_targets_recover_the_prior(paths, level, solver, context):
     (numerically) zero deformation (arch doc §14.1 DGP 1, §16.2)."""
     psi = FAMILY.evaluate_normalized(level, paths.x[:, -1])
     targets = psi.mean(axis=0)  # prior moments of the normalized basis = 0
-    cal = AlternatingDualCalibrator(FAMILY, solver=solver)
+    cal = ReducedMomentMapCalibrator(FAMILY, solver=solver)
     fit = cal.fit(level, targets, paths, context=context)
     assert fit.converged
     sol = cal.solve_at(level, fit.lam, paths, context)

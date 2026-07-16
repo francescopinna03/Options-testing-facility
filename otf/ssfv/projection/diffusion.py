@@ -49,9 +49,14 @@ class DiffusionMartingaleProjector:
         through the dynamic hedging term -N^S, never through the entropy.
         """
         lam = self.implied_multiplier(z_price, v)
+        # F'(lambda) = v: report the actual minimum over the batch (v = 0
+        # states included — monotonicity is strict only on {v > 0}); there
+        # is no numerical root solve in the diffusion sector, so this is
+        # the honest diagnostic, not a placeholder.
+        min_deriv = float(v.min()) if v.size else float("nan")
         diag = ProjectorDiagnostics(
             max_root_residual=0.0,
-            min_derivative=1.0,  # F'(lambda) = v > 0: strictly monotone
+            min_derivative=min_deriv,
             max_abs_multiplier=float(np.max(np.abs(lam))) if lam.size else 0.0,
             newton_steps=0,
             bisection_fallbacks=0,

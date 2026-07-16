@@ -41,7 +41,8 @@ from otf.ssfv.interfaces import (
     MartingaleProjector,
     ProjectedBSDESolver,
     FiniteDualCalibrator,
-    PosteriorMeasure,
+    CharacteristicPosteriorModel,
+    ReweightedPosteriorMeasure,
     SSFVEvaluator,
 )
 from otf.ssfv.config import (
@@ -79,7 +80,8 @@ __all__ = [
     "MartingaleProjector",
     "ProjectedBSDESolver",
     "FiniteDualCalibrator",
-    "PosteriorMeasure",
+    "CharacteristicPosteriorModel",
+    "ReweightedPosteriorMeasure",
     "SSFVEvaluator",
     # config
     "PriorConfig",

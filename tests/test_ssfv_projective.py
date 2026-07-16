@@ -21,7 +21,7 @@ pytest.importorskip("numpy")
 
 from otf.ssfv.bsde.picard import PicardHopfColeSolver
 from otf.ssfv.constraints.hat_family import LambdaPotential, NestedHatFamily
-from otf.ssfv.dual.calibrator import AlternatingDualCalibrator
+from otf.ssfv.dual.calibrator import ReducedMomentMapCalibrator
 from otf.ssfv.dual.projective_sequence import ProjectiveSequence
 from otf.ssfv.posterior.reweight import ReweightedPosterior
 from otf.ssfv.prior.heston import HestonPrior
@@ -36,7 +36,7 @@ MOMENT_TOL = 6e-3  # ~ MC noise floor of the self-consistent targets
 def setting():
     paths = PRIOR.simulate(N_PATHS, N_STEPS, T, seed=1729)
     solver = PicardHopfColeSolver().for_prior(PRIOR)
-    cal = AlternatingDualCalibrator(FAMILY, solver=solver, max_outer=4,
+    cal = ReducedMomentMapCalibrator(FAMILY, solver=solver, max_outer=4,
                                     moment_tolerance=2e-3)
 
     # DGP 2: known potential at the fine level.

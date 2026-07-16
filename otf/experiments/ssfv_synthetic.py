@@ -25,7 +25,7 @@ import numpy as np
 from otf.ssfv.bsde.picard import PicardHopfColeSolver
 from otf.ssfv.config import ExperimentConfig, PriorConfig, SimulationConfig, derive_seed
 from otf.ssfv.constraints.hat_family import LambdaPotential, NestedHatFamily
-from otf.ssfv.dual.calibrator import AlternatingDualCalibrator
+from otf.ssfv.dual.calibrator import ReducedMomentMapCalibrator
 from otf.ssfv.dual.projective_sequence import ProjectiveSequence
 from otf.ssfv.posterior.reweight import ReweightedPosterior
 from otf.ssfv.prior.heston import HestonPrior
@@ -56,7 +56,7 @@ def main(argv=None) -> int:
 
     family = NestedHatFamily(k_min=-0.5, k_max=0.5, base_dim=4)
     solver = PicardHopfColeSolver().for_prior(prior)
-    cal = AlternatingDualCalibrator(family, solver=solver)
+    cal = ReducedMomentMapCalibrator(family, solver=solver)
 
     # DGP 2: known potential at the finest requested level.
     fine = family.normalize(family.level(max(args.levels)), paths.x[:, -1])
@@ -75,14 +75,20 @@ def main(argv=None) -> int:
 
     runs = ProjectiveSequence(cal).run(paths, args.levels, targets_fn=targets_fn)
 
-    manifest = config.manifest(extra={
-        "experiment": "ssfv_synthetic_dgp2",
-        "n_steps": args.steps,
-        "levels": args.levels,
-        "path_batch_hash": paths.batch_hash,
-        "dgp_lambda_star": lam_star.tolist(),
-        "dgp_entropy_lr": post_star.entropy_lr(),
-    })
+    manifest = config.manifest(
+        # The concrete components that actually ran, serialized field by
+        # field: the manifest must describe the executed algorithm, never
+        # a config default that a code path ignored.
+        components={"prior": prior, "family": family, "solver": solver,
+                    "calibrator": cal},
+        extra={
+            "experiment": "ssfv_synthetic_dgp2",
+            "n_steps": args.steps,
+            "levels": args.levels,
+            "path_batch_hash": paths.batch_hash,
+            "dgp_lambda_star": lam_star.tolist(),
+            "dgp_entropy_lr": post_star.entropy_lr(),
+        })
     (out / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True))
 
     table = []
@@ -100,6 +106,8 @@ def main(argv=None) -> int:
             "forward_error": r.bundle.martingale.forward_error,
             "kl_direct": r.bundle.projective.kl_direct,
             "delta_h": r.bundle.projective.delta_h,
+            "cauchy_slack": r.bundle.projective.cauchy_slack,
+            "posterior_mean_semistatic_gain": r.bundle.diagnostics["posterior_mean_semistatic_gain"],
             "ess_fraction": r.bundle.diagnostics["ess_fraction"],
         })
     (out / "refinement_table.json").write_text(json.dumps(table, indent=2))

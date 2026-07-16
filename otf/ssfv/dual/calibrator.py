@@ -1,5 +1,21 @@
-"""Finite dual calibration: maximize D_n(lambda) = lambda^T a_n - Y_0(Phi_lambda)
-(arch doc §10; DECISIONS.md D6 — primary algorithm of the projective core).
+"""Finite dual calibration via the reduced moment map (arch doc §10;
+DECISIONS.md D6 — primary algorithm of the projective core).
+
+The calibrator solves the moment equations m(lambda) = a_n rather than
+running a certified ascent on the dual D_n(lambda) = lambda^T a_n -
+Y_0^sample(Phi_lambda) — hence the name ReducedMomentMapCalibrator. The
+two are consistent by a *structural* theorem, not by convention: the
+sample-dual gradient is
+
+    dD_n/dlambda = a_n - E^w[Psi] + E^w[d_lambda N^S],
+
+and d_lambda N^S is a stochastic integral against W^S. In the diffusion
+sector the Girsanov change of measure moves only W^perp (the projector is
+structural), so W^S remains a Q_lambda-Brownian motion and
+E^{Q_lambda}[d_lambda N^S] = 0 exactly in continuous time, O(1/sqrt(N))
+on the sample. A zero of the moment map is therefore a first-order
+condition of the sample dual up to Monte Carlo error; the certified-dual
+upgrade (implicit differentiation of the Picard fixed point) is M2 scope.
 
 Two-stage realization:
 
@@ -23,11 +39,13 @@ Two-stage realization:
   and diverges, and the pseudo-inverse instead takes the minimal-norm step
   in the identifiable subspace.
 
-Safeguards: an exact sup-norm trust region per step, and ESS backtracking
-— for the mild deformations of interest the true log-weights have std
-about sqrt(2H), so an ESS collapse always signals field-estimation noise
-and the step is halved. If no acceptable step exists the fit stops and
-says so (§20: fail loudly); the certificates carry the residuals.
+Safeguards per step: an exact sup-norm trust region; a monotone line
+search — the step is accepted only if the moment residual ||a - m||
+strictly decreases; and ESS backtracking — for the mild deformations of
+interest the true log-weights have std about sqrt(2H), so an ESS collapse
+always signals field-estimation noise. Failing candidates are halved; if
+no acceptable step exists the fit stops and says so (§20: fail loudly);
+the certificates carry the residuals.
 """
 
 from __future__ import annotations
@@ -40,11 +58,11 @@ import numpy as np
 from otf.ssfv.constraints.hat_family import LambdaPotential, NestedHatFamily
 from otf.ssfv.types import BSDESolution, ConstraintLevel, DualFitResult, PathBatch
 
-__all__ = ["AlternatingDualCalibrator"]
+__all__ = ["ReducedMomentMapCalibrator"]
 
 
 @dataclass(frozen=True)
-class AlternatingDualCalibrator:
+class ReducedMomentMapCalibrator:
     """FiniteDualCalibrator backend: static warm start + reduced Gauss-Newton."""
 
     family: NestedHatFamily
@@ -126,16 +144,26 @@ class AlternatingDualCalibrator:
             dphi = sup_phi(step)
             if dphi > self.delta_phi_max:
                 step *= self.delta_phi_max / dphi
-            # ESS backtracking.
+            # Monotone line search + ESS backtracking: a candidate is
+            # accepted only if the moment residual strictly decreases AND
+            # the ESS survives. A solver fixed-point failure on the
+            # candidate (Picard not self-consistent at that lambda) is a
+            # rejected step, not a crash — halve and retry.
             accepted = False
             for _ in range(self.max_backtracks + 1):
-                m_new, ess_new, sol_new = moments_of(lam + step)
-                if ess_new >= self.min_ess_fraction:
+                try:
+                    m_new, ess_new, sol_new = moments_of(lam + step)
+                except ValueError:
+                    step *= 0.5
+                    continue
+                gnorm_new = float(np.linalg.norm(targets - m_new))
+                if ess_new >= self.min_ess_fraction and gnorm_new < gnorm:
                     accepted = True
                     break
                 step *= 0.5
             if not accepted:
-                status = "stopped: no ESS-preserving step (field noise dominates)"
+                status = ("stopped: no residual-decreasing, ESS-preserving "
+                          "step (field noise dominates)")
                 break
             lam = lam + step
             m, ess, sol = m_new, ess_new, sol_new

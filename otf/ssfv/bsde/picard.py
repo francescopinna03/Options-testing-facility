@@ -91,6 +91,13 @@ class PicardHopfColeSolver:
     n_picard: int = 12
     picard_damping: float = 0.6  # under-relaxation of the Lambda-field update
     picard_tol: float = 1.0e-3  # early stop on rms field change
+    # Acceptance threshold on the fixed-point residual of the final
+    # consistency sweep, relative to the field rms scale. The solution is
+    # only returned when r_FP = ||Z^{S,eval} - Z-bar^S|| is below it; a
+    # violation means the Picard iteration did not reach a self-consistent
+    # field and the solve fails loudly (§20). Sized a few multiples of
+    # picard_tol: at convergence r_FP = O(picard_delta).
+    fp_tolerance: float = 5.0e-3
     h_floor_log: float = 3.0  # floor = e^{-||Phi|| - h_floor_log}
     # Score-field caps. |U_x| <= Lip(Phi) is a theorem
     # (prop:tangential-lipschitz: global, translation invariance). The
@@ -109,7 +116,7 @@ class PicardHopfColeSolver:
             n_folds=self.n_folds, gram_ridge=self.gram_ridge,
             score_from=self.score_from, n_picard=self.n_picard,
             picard_damping=self.picard_damping, picard_tol=self.picard_tol,
-            h_floor_log=self.h_floor_log,
+            fp_tolerance=self.fp_tolerance, h_floor_log=self.h_floor_log,
             score_cap_multiplier=self.score_cap_multiplier,
             rho=prior.rho, xi=prior.xi,
         )
@@ -199,78 +206,13 @@ class PicardHopfColeSolver:
         else:
             zs = np.zeros((n_paths, n_steps))  # Z^S field, defines the killing
             zp = np.zeros((n_paths, n_steps))
-        h_path = None
-        y0 = 0.0
-        n_clipped = 0
-        n_score_capped = 0
-        cv_num = cv_den = 0.0
         picard_delta = float("inf")
 
         for it in range(self.n_picard):
             kill = np.exp(-0.5 * zs**2 * dt)  # frozen-multiplier FK weight
-            zs_new = np.empty_like(zs)
-            zp_new = np.empty_like(zp)
-            h_path = np.empty((n_paths, n_steps + 1))
-            h_path[:, -1] = h_T
-            n_clipped = 0
-            n_score_capped = 0
-            cv_num = cv_den = 0.0
-            for j in range(n_steps - 1, -1, -1):
-                target = h_path[:, j + 1]
-                if j == 0:
-                    eh = np.full(n_paths, target.mean())
-                    resid = target - eh
-                    hs = (resid * paths.d_w[:, 0, 0]).mean() / dt
-                    hy_incr = (resid * paths.d_w[:, 0, 1]).mean() / dt
-                    # Z fields at the deterministic initial state via the
-                    # increment estimators (no fitted derivative exists).
-                    zs_new[:, 0] = hs / eh
-                    zp_new[:, 0] = hy_incr / eh
-                    h0v = eh * kill[:, 0]
-                    h_path[:, 0] = np.clip(h0v, h_floor, h_cap)
-                else:
-                    F = context.features[j]
-                    eh = np.empty(n_paths)
-                    gs = np.empty(n_paths)  # score numerator, W^S channel
-                    gp = np.empty(n_paths)  # score numerator, W^perp channel
-                    for f, mask in enumerate(context.fold_masks):
-                        gram_inv, train = context.gram_pinv[j][f]
-                        At = F[train].T
-                        # Ridge shrinks toward the *fold-mean predictor*,
-                        # not toward zero: fit the centered target and add
-                        # the mean back. A constant target (zero potential)
-                        # is then reproduced exactly — the §16.2 property
-                        # "zero potential returns the prior" survives the
-                        # regularization.
-                        ybar = float(target[train].mean())
-                        coef = gram_inv @ (At @ (target[train] - ybar))
-                        eh[mask] = ybar + F[mask] @ coef
-                        if self.score_from == "increments":
-                            resid = target[train] - ybar - F[train] @ coef
-                            gs[mask] = F[mask] @ (gram_inv @ (At @ (resid * paths.d_w[train, j, 0]))) / dt
-                            gp[mask] = F[mask] @ (gram_inv @ (At @ (resid * paths.d_w[train, j, 1]))) / dt
-                        else:  # analytic derivatives of the fitted h
-                            ehx = context.dfeat_x[j][mask] @ coef
-                            ehy = context.dfeat_y[j][mask] @ coef
-                            gs[mask] = sqv[mask, j] * ehx + rho * xi * ehy / 2.0
-                            gp[mask] = xi * orto * ehy / 2.0
-                    cv_num += float(((target - eh) ** 2).mean())
-                    cv_den += float(target.var()) + 1e-30
-                    over = (eh < h_floor) | (eh > h_cap)
-                    n_clipped += int(over.sum())
-                    ehc = np.clip(eh, h_floor, h_cap)
-                    # Z = (score numerator) / h, capped at the
-                    # theoretical/engineering budgets above. For the
-                    # increment route gs, gp are the W-coefficients of dh
-                    # (both channels directly); for the derivative route
-                    # they are assembled from (h_x, h_y).
-                    zs_raw = gs / ehc
-                    zp_raw = gp / ehc
-                    n_score_capped += int((np.abs(zs_raw) > zs_cap).sum())
-                    n_score_capped += int((np.abs(zp_raw) > zp_cap).sum())
-                    zs_new[:, j] = np.clip(zs_raw, -zs_cap, zs_cap)
-                    zp_new[:, j] = np.clip(zp_raw, -zp_cap, zp_cap)
-                    h_path[:, j] = ehc * kill[:, j]
+            _, zs_new, zp_new, _ = self._backward_pass(
+                paths, context, kill, h_T, h_floor, h_cap, zs_cap, zp_cap, sqv, dt,
+            )
             picard_delta = float(np.sqrt(np.mean((zs_new - zs) ** 2)))
             scale = float(np.sqrt(np.mean(zs_new**2))) + 1e-12
             # Under-relaxed field update: the full-slab fixed-point map is
@@ -279,11 +221,34 @@ class PicardHopfColeSolver:
             omega = self.picard_damping if it > 0 else 1.0
             zs = (1.0 - omega) * zs + omega * zs_new
             zp = (1.0 - omega) * zp + omega * zp_new
-            y0 = float(np.log(h_path[:, 0].mean()))
             if picard_delta < self.picard_tol * scale:
                 break
 
-        # Semistatic (LR) density and EN cross-check.
+        # Final consistency sweep. Freeze the converged field Z-bar = (zs,
+        # zp), run one last linear propagation with no field update, and
+        # build every returned object — h, Y_0, density — from that single
+        # pass. The returned solution is therefore an approximate solution
+        # of the *frozen linear problem* at Z-bar plus a fixed-point
+        # residual r_FP = ||Z^{S,eval} - Z-bar^S||_{L2}; the fields
+        # extracted from this sweep are a diagnostic only and are never
+        # substituted back (that would re-associate h with the previous
+        # field). In the limit r_FP -> 0 the two objects coincide.
+        kill = np.exp(-0.5 * zs**2 * dt)
+        h_path, zs_eval, zp_eval, stats = self._backward_pass(
+            paths, context, kill, h_T, h_floor, h_cap, zs_cap, zp_cap, sqv, dt,
+        )
+        n_clipped, n_score_capped, cv_num, cv_den = stats
+        y0 = float(np.log(h_path[:, 0].mean()))
+        field_scale = float(np.sqrt(np.mean(zs**2)))
+        r_fp = float(np.sqrt(np.mean((zs_eval - zs) ** 2)))
+        if r_fp > self.fp_tolerance * field_scale + 1e-8:
+            raise ValueError(
+                f"picard fixed-point residual {r_fp:.3e} exceeds "
+                f"{self.fp_tolerance:.1e} x field scale {field_scale:.3e}: "
+                "the returned (h, Z) pair is not self-consistent"
+            )
+
+        # Semistatic (LR) density and EN cross-check — from the frozen field.
         n_s = (zs * paths.d_w[:, :, 0]).sum(axis=1)
         n_perp = (zp * paths.d_w[:, :, 1]).sum(axis=1)
         energy = 0.5 * (zp**2).sum(axis=1) * dt
@@ -300,6 +265,7 @@ class PicardHopfColeSolver:
             "terminal_residual": 0.0,
             "regression_cv_error": float(cv_num / cv_den) if cv_den > 0 else 0.0,
             "picard_delta_zs_rms": picard_delta,
+            "fixed_point_residual": r_fp,
             "positivity_clipped_fraction": n_clipped / (n_paths * n_steps),
             "score_capped_fraction": n_score_capped / (2 * n_paths * n_steps),
         }
@@ -309,6 +275,89 @@ class PicardHopfColeSolver:
             projector=proj_diag, residuals=residuals,
             y0_sample=y0 + float(lse),
         )
+
+    def _backward_pass(self, paths: PathBatch, context: PicardContext,
+                       kill: np.ndarray, h_T: np.ndarray, h_floor: float,
+                       h_cap: float, zs_cap: float, zp_cap: float,
+                       sqv: np.ndarray, dt: float):
+        """One linear killed-FK backward propagation at a frozen killing
+        field: h_j = clip(E_j[h_{j+1}]) * kill_j, with score fields
+        extracted along the way.
+
+        The score ratio gs/ehc divides by the *pre-kill* conditional mean
+        while h stores kill * ehc; since kill = 1 + O(dt) this is a
+        first-order-in-dt discretization of the Feynman-Kac score, not an
+        exact discrete identity — its Delta-t convergence is measured by
+        the dt-refinement table (experiments CLI --dt-table and
+        test_ssfv_bsde_dual dt-convergence test).
+        """
+        rho, xi = self.rho, self.xi
+        orto = np.sqrt(1.0 - rho**2)
+        n_paths, n_steps = paths.n_paths, paths.n_steps
+        zs_new = np.empty((n_paths, n_steps))
+        zp_new = np.empty((n_paths, n_steps))
+        h_path = np.empty((n_paths, n_steps + 1))
+        h_path[:, -1] = h_T
+        n_clipped = 0
+        n_score_capped = 0
+        cv_num = cv_den = 0.0
+        for j in range(n_steps - 1, -1, -1):
+            target = h_path[:, j + 1]
+            if j == 0:
+                eh = np.full(n_paths, target.mean())
+                resid = target - eh
+                hs = (resid * paths.d_w[:, 0, 0]).mean() / dt
+                hy_incr = (resid * paths.d_w[:, 0, 1]).mean() / dt
+                # Z fields at the deterministic initial state via the
+                # increment estimators (no fitted derivative exists).
+                zs_new[:, 0] = hs / eh
+                zp_new[:, 0] = hy_incr / eh
+                h0v = eh * kill[:, 0]
+                h_path[:, 0] = np.clip(h0v, h_floor, h_cap)
+            else:
+                F = context.features[j]
+                eh = np.empty(n_paths)
+                gs = np.empty(n_paths)  # score numerator, W^S channel
+                gp = np.empty(n_paths)  # score numerator, W^perp channel
+                for f, mask in enumerate(context.fold_masks):
+                    gram_inv, train = context.gram_pinv[j][f]
+                    At = F[train].T
+                    # Ridge shrinks toward the *fold-mean predictor*,
+                    # not toward zero: fit the centered target and add
+                    # the mean back. A constant target (zero potential)
+                    # is then reproduced exactly — the §16.2 property
+                    # "zero potential returns the prior" survives the
+                    # regularization.
+                    ybar = float(target[train].mean())
+                    coef = gram_inv @ (At @ (target[train] - ybar))
+                    eh[mask] = ybar + F[mask] @ coef
+                    if self.score_from == "increments":
+                        resid = target[train] - ybar - F[train] @ coef
+                        gs[mask] = F[mask] @ (gram_inv @ (At @ (resid * paths.d_w[train, j, 0]))) / dt
+                        gp[mask] = F[mask] @ (gram_inv @ (At @ (resid * paths.d_w[train, j, 1]))) / dt
+                    else:  # analytic derivatives of the fitted h
+                        ehx = context.dfeat_x[j][mask] @ coef
+                        ehy = context.dfeat_y[j][mask] @ coef
+                        gs[mask] = sqv[mask, j] * ehx + rho * xi * ehy / 2.0
+                        gp[mask] = xi * orto * ehy / 2.0
+                cv_num += float(((target - eh) ** 2).mean())
+                cv_den += float(target.var()) + 1e-30
+                over = (eh < h_floor) | (eh > h_cap)
+                n_clipped += int(over.sum())
+                ehc = np.clip(eh, h_floor, h_cap)
+                # Z = (score numerator) / h, capped at the
+                # theoretical/engineering budgets above. For the
+                # increment route gs, gp are the W-coefficients of dh
+                # (both channels directly); for the derivative route
+                # they are assembled from (h_x, h_y).
+                zs_raw = gs / ehc
+                zp_raw = gp / ehc
+                n_score_capped += int((np.abs(zs_raw) > zs_cap).sum())
+                n_score_capped += int((np.abs(zp_raw) > zp_cap).sum())
+                zs_new[:, j] = np.clip(zs_raw, -zs_cap, zs_cap)
+                zp_new[:, j] = np.clip(zp_raw, -zp_cap, zp_cap)
+                h_path[:, j] = ehc * kill[:, j]
+        return h_path, zs_new, zp_new, (n_clipped, n_score_capped, cv_num, cv_den)
 
     def projector(self) -> DiffusionMartingaleProjector:
         return DiffusionMartingaleProjector()
