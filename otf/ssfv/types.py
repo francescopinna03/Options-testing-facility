@@ -112,40 +112,66 @@ class ProjectedCharacteristics:
 
 @dataclass(frozen=True)
 class NormalizationMap:
-    """Prior-marginal standardization of a basis level (arch doc §6.2).
+    """Nested normalization plan of a cumulative basis level (arch doc
+    §6.2, review fix R2).
 
-    psi_tilde_j = (psi_j - mean_j) / sqrt(var_j + eps), followed by gauge
-    removal encoded in ``kept_indices`` (dropped constant direction and
-    exact linear dependencies). Saved so coefficients stay interpretable and
-    refinement levels comparable.
+    The normalized columns are psi_tilde = (psi_raw - means) @ transform,
+    where ``transform`` is block-triangular in column-creation order:
+    every accepted column is the previous levels' column *unchanged*, and
+    columns new at this level are standardized then residualized against
+    the span of all previously accepted columns on the pilot prior
+    sample. Consequences, both structural:
+
+    * span(Psi_tilde_n) ⊆ span(Psi_tilde_{n+1}) exactly — the first
+      ``inherited_dim`` columns of level n+1 ARE level n's columns, so
+      C_{n+1} ⊆ C_n holds by construction and the projective Cauchy
+      certificate applies as a theorem, not an approximation;
+    * embedding coefficients upward is zero-padding (machine-exact).
+
+    Inherited columns can never be removed. A new column whose raw or
+    residual variance falls below the floor is *rejected* and recorded in
+    ``rejected_indices`` — the statistical gauge (§6.3) acts only on new
+    directions.
     """
 
-    means: Array  # (d_raw,)
-    stds: Array  # (d_raw,)  = sqrt(var + eps)
+    means: Array  # (d_raw,) raw column means on the pilot sample
+    stds: Array  # (d_raw,) raw column stds (diagnostic; transform is authoritative)
+    transform: Array  # (d_raw, d_kept), block-triangular in creation order
+    kept_indices: tuple[int, ...]  # raw column generating each kept direction
+    rejected_indices: tuple[int, ...]  # raw columns rejected by the variance gauge
+    inherited_dim: int  # leading kept columns identical to the previous level
     eps: float
-    kept_indices: tuple[int, ...]  # gauge-reduced raw indices retained
     normalization_seed: int
 
 
 @dataclass(frozen=True)
 class ConstraintLevel:
-    """One level n of the nested bounded test family Psi_n.
+    """One level n of the *cumulative* bounded test family Psi_n.
 
-    ``knots`` are the dyadic nodes in forward log-moneyness
-    k = log(S_T / F_{0,T}); nesting span(Psi_n) ⊆ span(Psi_{n+1}) is exact
-    for piecewise-linear hats on nested knot grids and is unit-tested.
+    Columns are bounded piecewise-linear functions of forward
+    log-moneyness k = log(S_T / F_{0,T}): hats (compact support) and
+    capped tail ramps (constant in the far tails). Levels are cumulative:
+    level n+1 contains every level-n column unchanged and appends new
+    ones (interior midpoint hats, outward-extension hats, new tail
+    ramps), so nesting is an identity of column lists, not a span
+    argument. ``knots`` is the sorted union of all column breakpoints —
+    the potential is piecewise linear exactly there.
     """
 
     n: int
     family: str
-    knots: Array  # (d_raw + 2,) including boundary
+    knots: Array  # sorted union of all column breakpoints
+    col_kind: Array  # (d_raw,) int: 0 = hat, 1 = left ramp, 2 = right ramp
+    col_loc: Array  # (d_raw,) hat center / ramp edge
+    col_wl: Array  # (d_raw,) hat left width / ramp width
+    col_wr: Array  # (d_raw,) hat right width (unused for ramps)
     k_min: float
     k_max: float
     normalization: NormalizationMap | None
 
     @property
     def dim_raw(self) -> int:
-        return int(self.knots.shape[0]) - 2
+        return int(self.col_kind.shape[0])
 
     @property
     def dim(self) -> int:

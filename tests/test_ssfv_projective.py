@@ -39,13 +39,11 @@ def setting():
     cal = ReducedMomentMapCalibrator(FAMILY, solver=solver, max_outer=4,
                                     moment_tolerance=2e-3)
 
-    # DGP 2: known potential at the fine level.
+    # DGP 2: known potential at the fine level, sup|Phi*| = 0.4.
     lvl1 = FAMILY.normalize(FAMILY.level(1), paths.x[:, -1])
-    nm = lvl1.normalization
-    kept = list(nm.kept_indices)
-    colbound = (1.0 + np.abs(nm.means[kept])) / nm.stds[kept]
     rng = np.random.default_rng(7)
-    lam_star = rng.normal(0.0, 0.5, lvl1.dim) / colbound
+    lam_star = rng.normal(0.0, 1.0, lvl1.dim)
+    lam_star *= 0.4 / LambdaPotential(FAMILY, lvl1, lam_star).sup_norm_exact()
     ctx1 = cal.build_context(lvl1, paths)
     sol_star = solver.solve(paths, LambdaPotential(FAMILY, lvl1, lam_star), ctx1)
     post_star = ReweightedPosterior(paths, sol_star)
@@ -83,15 +81,20 @@ def test_projective_cauchy_certificate(setting):
     b = runs[1].bundle.projective
     assert b.n_prev == 0
     assert b.kl_direct is not None and b.delta_h is not None
-    # KL(Q_1 | Q_0) <= H_1 - H_0 up to estimation slack.
-    assert b.kl_direct <= b.delta_h + 2e-3
+    # Signed Cauchy slack H_1 - H_0 - KL(Q_1 | Q_0) >= 0 up to MC slack:
+    # a negative value beyond it is a theorem violation, not a magnitude.
+    assert b.cauchy_slack is not None
+    assert b.cauchy_slack > -2e-3
 
 
 def test_duality_gap_and_martingale(setting):
     _, _, runs = setting
     for r in runs:
-        assert r.bundle.duality.gap < 1e-2
+        # Signed gap: weak duality requires H_LR - D_n >= 0 up to MC error.
+        assert -2e-3 < r.bundle.duality.gap < 1e-2
         assert r.bundle.martingale.forward_error < 5e-3
+        # E^{Q_n}[N^S_T] = 0: W^S stays a Q_n-martingale (structural).
+        assert abs(r.bundle.diagnostics["posterior_mean_semistatic_gain"]) < 2e-2
         assert r.bundle.diagnostics["ess_fraction"] > 0.9
 
 

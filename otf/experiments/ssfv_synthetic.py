@@ -58,13 +58,13 @@ def main(argv=None) -> int:
     solver = PicardHopfColeSolver().for_prior(prior)
     cal = ReducedMomentMapCalibrator(family, solver=solver)
 
-    # DGP 2: known potential at the finest requested level.
+    # DGP 2: known potential at the finest requested level, rescaled so
+    # sup|Phi*| equals --potential-scale exactly.
     fine = family.normalize(family.level(max(args.levels)), paths.x[:, -1])
-    nm = fine.normalization
-    kept = list(nm.kept_indices)
-    colbound = (1.0 + np.abs(nm.means[kept])) / nm.stds[kept]
     rng = np.random.default_rng(derive_seed(args.seed, "potential"))
-    lam_star = rng.normal(0.0, args.potential_scale, fine.dim) / colbound
+    lam_star = rng.normal(0.0, 1.0, fine.dim)
+    sup0 = LambdaPotential(family, fine, lam_star).sup_norm_exact()
+    lam_star *= args.potential_scale / max(sup0, 1e-12)
     ctx_fine = cal.build_context(fine, paths)
     sol_star = solver.solve(paths, LambdaPotential(family, fine, lam_star), ctx_fine)
     post_star = ReweightedPosterior(paths, sol_star)

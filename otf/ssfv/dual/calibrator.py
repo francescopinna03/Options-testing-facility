@@ -119,9 +119,23 @@ class ReducedMomentMapCalibrator:
 
         # Stage 1: exact static exponential-family fit (marginal-only tilt).
         if warm_start is None:
-            lam = self._static_newton(np.zeros(d), targets, psi_T, np.zeros(n_paths))
+            lam0 = np.zeros(d)
+            lam = self._static_newton(lam0, targets, psi_T, np.zeros(n_paths))
         else:
-            lam = np.asarray(warm_start, dtype=float).copy()
+            # Warm-started levels still need stage 1 for the *new*
+            # directions (embedded coefficients are zero there): freeze the
+            # dynamic offset N^S at the warm start and run the exact static
+            # Newton on the offset exponential family from it.
+            lam0 = np.asarray(warm_start, dtype=float).copy()
+            sol_w = self._solve(level, lam0, paths, context)
+            lam = self._static_newton(lam0, targets, psi_T,
+                                      self._dynamic_offset(sol_w, paths))
+        # The static stage has no dynamic feedback, so on barely
+        # identifiable directions (§6.3) it can run far: apply the same
+        # exact sup-norm trust region as stage 2 to its total move.
+        dphi0 = sup_phi(lam - lam0)
+        if dphi0 > self.delta_phi_max:
+            lam = lam0 + (lam - lam0) * (self.delta_phi_max / dphi0)
 
         # Stage 2: Gauss-Newton on the field-refreshed moment map.
         m, ess, sol = moments_of(lam)

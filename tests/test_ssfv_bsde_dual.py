@@ -49,12 +49,12 @@ def context(paths, level, solver):
 
 @pytest.fixture(scope="module")
 def lam_star(level):
-    # Multipliers scaled per column so each basis element contributes an
-    # O(0.3) potential: the regime real calibration targets live in.
-    nm = level.normalization
-    colbound = (1.0 + np.abs(nm.means)) / nm.stds
+    # Multipliers rescaled so sup|Phi*| = 0.35 exactly: the mild-
+    # deformation regime real calibration targets live in.
     rng = np.random.default_rng(5)
-    return rng.normal(0.0, 0.35, level.dim) / colbound[list(nm.kept_indices)]
+    lam = rng.normal(0.0, 1.0, level.dim)
+    sup = LambdaPotential(FAMILY, level, lam).sup_norm_exact()
+    return lam * (0.35 / sup)
 
 
 @pytest.fixture(scope="module")

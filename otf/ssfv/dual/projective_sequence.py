@@ -61,8 +61,12 @@ class ProjectiveSequence:
         prev_cert: tuple[int, float, ReweightedPosterior] | None = None
 
         for n in levels:
+            # Threading `previous` inherits the coarser level's transform
+            # verbatim (nested normalization plan): C_{n+1} ⊆ C_n is then
+            # structural, which is what the Cauchy certificate needs.
             level = family.normalize(family.level(n), paths.x[:, -1],
-                                     normalization_seed=normalization_seed)
+                                     normalization_seed=normalization_seed,
+                                     previous=prev_level)
             if targets_fn is not None:
                 targets = np.asarray(targets_fn(level), dtype=float)
             else:
