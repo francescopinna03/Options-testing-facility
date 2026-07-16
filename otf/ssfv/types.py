@@ -265,16 +265,28 @@ class DualFitResult:
 class DualityCertificate:
     """§12.1 finite duality: primal entropy vs dual value.
 
-    ``gap`` is the *signed* primal-dual gap H^LR - D_n. Weak duality
-    requires gap >= 0 up to Monte Carlo error: a negative value beyond
-    the MC tolerance is a violation to be explained, never folded into
-    an absolute value.
+    ``gap`` is the *signed* primal-dual gap H^LR - D_n. For the returned
+    (approximately calibrated) law Q-bar_lambda the certifiable statement
+    is the exact sample identity
+
+        H - D_n = lambda^T (m(lambda) - a) - E^{Q-bar}[N^S_T],
+
+    so the gap decomposes into ``moment_defect`` = lambda^T (m - a) and
+    ``semistatic_defect`` = -E^{Q-bar}[N^S_T];
+    ``duality_identity_residual`` = (H - D) - (moment_defect +
+    semistatic_defect) must sit at floating-point/MC noise. A negative
+    gap explained by the defects is *primal inadmissibility of the
+    approximate fit*, not a weak-duality violation; an identity residual
+    beyond noise is a real inconsistency and must fail.
     """
 
     primal_entropy: float
     dual_value: float
     gap: float  # signed: primal_entropy - dual_value
     moment_residual_norm: float
+    moment_defect: float = 0.0  # lambda^T (m(lambda) - a)
+    semistatic_defect: float = 0.0  # -E^{Q-bar}[N^S_T]
+    duality_identity_residual: float = 0.0  # gap - (moment + semistatic defects)
 
 
 @dataclass(frozen=True)
@@ -303,8 +315,21 @@ class ProjectiveCertificate:
     ``kl_direct`` is the direct estimate of the left-hand side when
     available; the observable plateau of H_n is the main convergence
     certificate. ``cauchy_slack`` is the *signed* slack
-    H_N - H_n - KL(Q_N | Q_n): the theorem requires it >= 0, and a
-    negative value beyond tolerance must fail the certificate.
+    H_N - H_n - KL(Q_N | Q_n).
+
+    For approximately calibrated posteriors the slack is not
+    automatically nonnegative; its exact sample decomposition against
+    the coarse potential is
+
+        slack = lambda_n^T (m_N^{(n)} - m_n)
+                - (E^{Q_N}[N^{S,n}_T] - E^{Q_n}[N^{S,n}_T]),
+
+    stored as ``cauchy_moment_term`` and ``cauchy_semistatic_term``
+    (the parenthesized dynamic difference, entering with a minus sign).
+    ``cauchy_identity_residual`` = slack - (moment_term -
+    semistatic_term) must sit at floating-point/MC noise: it separates
+    nesting error, moment-calibration error and dynamic-term error from
+    a genuine numerical violation of the Pythagorean identity.
     """
 
     n_prev: int | None
@@ -313,6 +338,9 @@ class ProjectiveCertificate:
     kl_direct: float | None
     tv_bound: float | None
     cauchy_slack: float | None = None
+    cauchy_moment_term: float | None = None  # lambda_n^T (m_N^{(n)} - m_n)
+    cauchy_semistatic_term: float | None = None  # E^{Q_N}[N^{S,n}] - E^{Q_n}[N^{S,n}]
+    cauchy_identity_residual: float | None = None
 
 
 @dataclass(frozen=True)

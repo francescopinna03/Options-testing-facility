@@ -173,7 +173,6 @@ class PicardHopfColeSolver:
             raise ValueError("picard context was built for a different path batch")
 
         rho, xi = self.rho, self.xi
-        orto = np.sqrt(1.0 - rho**2)
         n_paths, n_steps = paths.n_paths, paths.n_steps
         dt = float(paths.times[1] - paths.times[0])
 

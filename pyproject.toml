@@ -24,3 +24,9 @@ include = ["otf*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff.lint.per-file-ignores]
+# pytest.importorskip must run before the numerical imports (CI stdlib lane).
+"tests/test_ssfv_*.py" = ["E402"]
+# Legacy freeze: cosmetic renames stay out of the golden-tested lineage.
+"otf/evaluation/stats.py" = ["E741"]

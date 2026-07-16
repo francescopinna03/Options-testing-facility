@@ -20,7 +20,7 @@ from typing import Sequence
 
 import numpy as np
 
-from otf.ssfv.certificates.bundle import build_certificate_bundle
+from otf.ssfv.certificates.bundle import PreviousLevelData, build_certificate_bundle
 from otf.ssfv.dual.calibrator import ReducedMomentMapCalibrator
 from otf.ssfv.posterior.reweight import ReweightedPosterior
 from otf.ssfv.types import CertificateBundle, ConstraintLevel, DualFitResult, PathBatch
@@ -58,7 +58,7 @@ class ProjectiveSequence:
         runs: list[LevelRun] = []
         prev_level: ConstraintLevel | None = None
         prev_lam: np.ndarray | None = None
-        prev_cert: tuple[int, float, ReweightedPosterior] | None = None
+        prev_cert: PreviousLevelData | None = None
 
         for n in levels:
             # Threading `previous` inherits the coarser level's transform
@@ -81,9 +81,14 @@ class ProjectiveSequence:
                                       warm_start=warm, context=context)
             sol = self.calibrator.solve_at(level, fit.lam, paths, context)
             psi = family.evaluate_normalized(level, paths.x[:, -1])
-            bundle, post = build_certificate_bundle(paths, sol, fit, psi, previous=prev_cert)
+            bundle, post = build_certificate_bundle(paths, sol, fit, psi, targets,
+                                                    previous=prev_cert)
 
             runs.append(LevelRun(level=level, fit=fit, bundle=bundle, posterior=post))
             prev_level, prev_lam = level, fit.lam
-            prev_cert = (n, bundle.entropy.h_lr, post)
+            prev_cert = PreviousLevelData(
+                n=n, h_lr=bundle.entropy.h_lr, posterior=post, lam=fit.lam,
+                psi_normalized=psi,
+                semistatic_gain=(sol.z[:, :, 0] * paths.d_w[:, :, 0]).sum(axis=1),
+            )
         return runs

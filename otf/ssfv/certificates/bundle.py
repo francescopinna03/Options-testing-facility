@@ -8,20 +8,30 @@ certificate table, not an OOS leaderboard (§21).
 Estimates:
 
 * duality (§12.1): primal entropy H^LR against the dual value
-  lambda^T a - Y_0^sample; their gap plus the moment residual.
+  lambda^T a - Y_0^sample, with the exact sample decomposition of the
+  signed gap for approximately calibrated laws:
+  H - D = lambda^T (m - a) - E^Q[N^S_T]. The identity residual must sit
+  at floating-point noise; the two defects say whether a nonzero gap is
+  primal inadmissibility (moments not met, dynamic term not centered) or
+  a genuine violation.
 * entropy identity (§12.2): H^LR (likelihood route) vs H^EN
   (characteristic-energy route).
 * martingale (§12.4): terminal forward error and the projector residual.
 * projective Cauchy (§12.3): for consecutive levels n_prev < n,
   KL(Q_n | Q_{n_prev}) <= H_n - H_{n_prev} and
   TV <= sqrt((H_n - H_{n_prev})/2); the direct KL estimate uses the two
-  weight vectors on the common paths.
+  weight vectors on the common paths, and the signed slack is decomposed
+  against the coarse potential (moment term minus dynamic term) so
+  nesting error, moment-calibration error, dynamic-term error and true
+  Pythagorean-identity violations are distinguishable.
 * conditioning (§10.3): eigenvalues of the weighted moment covariance —
   the *raw* Jacobian, a conditioning diagnostic only (the reduced Schur
   complement after eliminating dynamic multipliers is a later layer).
 """
 
 from __future__ import annotations
+
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -38,15 +48,28 @@ from otf.ssfv.types import (
     ProjectiveCertificate,
 )
 
-__all__ = ["build_certificate_bundle", "direct_kl"]
+__all__ = ["build_certificate_bundle", "direct_kl", "PreviousLevelData"]
 
 
 def direct_kl(post_fine: ReweightedPosterior, post_coarse: ReweightedPosterior) -> float:
     """KL(Q_fine | Q_coarse) estimated on the common prior paths."""
-    n = post_fine.paths.n_paths
     wf = np.maximum(post_fine.weights(), 1e-300)
     wc = np.maximum(post_coarse.weights(), 1e-300)
     return float(wf @ (np.log(wf) - np.log(wc)))
+
+
+@dataclass(frozen=True)
+class PreviousLevelData:
+    """What the Cauchy decomposition needs from the coarser level, all on
+    the same frozen path batch: its posterior, multipliers, normalized
+    basis at the terminal, and the pathwise semistatic gain N^{S,n}_T."""
+
+    n: int
+    h_lr: float
+    posterior: ReweightedPosterior
+    lam: np.ndarray
+    psi_normalized: np.ndarray  # (n_paths, d_n)
+    semistatic_gain: np.ndarray  # (n_paths,)
 
 
 def build_certificate_bundle(
@@ -54,25 +77,40 @@ def build_certificate_bundle(
     solution: BSDESolution,
     fit: DualFitResult,
     psi_normalized: np.ndarray,
-    previous: tuple[int, float, ReweightedPosterior] | None = None,
+    targets: np.ndarray,
+    previous: PreviousLevelData | None = None,
 ) -> tuple[CertificateBundle, ReweightedPosterior]:
     """Assemble the §12 bundle for one calibrated level.
 
-    ``previous`` is (n_prev, H_prev, posterior_prev) of the preceding
-    projective level on the same path batch, enabling the Cauchy
-    certificate; None for the first level.
+    ``previous`` carries the preceding projective level on the same path
+    batch, enabling the Cauchy certificate; None for the first level.
     """
     post = ReweightedPosterior(paths, solution)
     h_lr = post.entropy_lr()
     h_en = post.entropy_en()
+    w = post.weights()
+    lam = np.asarray(fit.lam, dtype=float)
 
+    # E^{Q_n}[N^S_T]: the semistatic gain is a Q_n-martingale increment sum
+    # (Girsanov moves only W^perp in the diffusion sector, so W^S stays a
+    # Q_n-Brownian motion) — its posterior mean must vanish up to MC error.
+    n_s_terminal = (solution.z[:, :, 0] * paths.d_w[:, :, 0]).sum(axis=1)
+
+    # Exact sample decomposition of the signed gap (see DualityCertificate):
+    # H - D = lambda^T (m - a) - E^Q[N^S_T], term by term on the same
+    # weight vector, so the identity residual is a pure consistency check.
+    m = w @ psi_normalized
+    gap = h_lr - fit.dual_value
+    moment_defect = float(lam @ (m - np.asarray(targets, dtype=float)))
+    semistatic_defect = -float(w @ n_s_terminal)
     duality = DualityCertificate(
         primal_entropy=h_lr,
         dual_value=fit.dual_value,
-        # Signed gap: weak duality requires H^LR - D_n >= 0 up to MC
-        # error. A negative value is a violation, not a magnitude.
-        gap=h_lr - fit.dual_value,
+        gap=gap,
         moment_residual_norm=fit.moment_residual_norm,
+        moment_defect=moment_defect,
+        semistatic_defect=semistatic_defect,
+        duality_identity_residual=gap - (moment_defect + semistatic_defect),
     )
     entropy = EntropyCertificate(h_lr=h_lr, h_en=h_en, discrepancy=abs(h_lr - h_en))
 
@@ -86,27 +124,39 @@ def build_certificate_bundle(
     if previous is None:
         projective = ProjectiveCertificate(
             n_prev=None, h_n=h_lr, delta_h=None, kl_direct=None, tv_bound=None,
-            cauchy_slack=None,
+            cauchy_slack=None, cauchy_moment_term=None,
+            cauchy_semistatic_term=None, cauchy_identity_residual=None,
         )
     else:
-        n_prev, h_prev, post_prev = previous
-        delta_h = h_lr - h_prev
-        kl = direct_kl(post, post_prev)
+        delta_h = h_lr - previous.h_lr
+        kl = direct_kl(post, previous.posterior)
+        slack = delta_h - kl
+        # Exact sample decomposition of the signed Cauchy slack against
+        # the coarse potential (see ProjectiveCertificate):
+        # slack = lambda_n^T (m_N^{(n)} - m_n)
+        #         - (E^{Q_N}[N^{S,n}] - E^{Q_n}[N^{S,n}]).
+        w_coarse = previous.posterior.weights()
+        m_fine_on_coarse = w @ previous.psi_normalized
+        m_coarse = w_coarse @ previous.psi_normalized
+        moment_term = float(np.asarray(previous.lam) @ (m_fine_on_coarse - m_coarse))
+        semistatic_term = float(w @ previous.semistatic_gain
+                                - w_coarse @ previous.semistatic_gain)
         projective = ProjectiveCertificate(
-            n_prev=n_prev,
+            n_prev=previous.n,
             h_n=h_lr,
             delta_h=delta_h,
             kl_direct=kl,
             tv_bound=float(np.sqrt(max(delta_h, 0.0) / 2.0)),
-            # Signed slack of the Cauchy inequality: the theorem requires
-            # H_N - H_n - KL(Q_N | Q_n) >= 0; negative beyond tolerance
-            # must fail the certificate.
-            cauchy_slack=delta_h - kl,
+            # Signed slack of the Cauchy inequality: >= 0 by the theorem
+            # for exactly calibrated laws; for approximate fits the
+            # decomposition below says which defect is responsible.
+            cauchy_slack=slack,
+            cauchy_moment_term=moment_term,
+            cauchy_semistatic_term=semistatic_term,
+            cauchy_identity_residual=slack - (moment_term - semistatic_term),
         )
 
-    w = post.weights()
-    mean = w @ psi_normalized
-    centered = psi_normalized - mean
+    centered = psi_normalized - m
     jac = centered.T @ (centered * w[:, None])
     eig = np.linalg.eigvalsh(jac)
     conditioning = ConditioningCertificate(
@@ -116,17 +166,12 @@ def build_certificate_bundle(
         n_removed_directions=psi_normalized.shape[1] - int((eig > 1e-12 * eig[-1]).sum()),
     )
 
-    # E^{Q_n}[N^S_T]: the semistatic gain is a Q_n-martingale increment sum
-    # (Girsanov moves only W^perp in the diffusion sector, so W^S stays a
-    # Q_n-Brownian motion) — its posterior mean must vanish up to MC error.
-    # This is the direct diagnosis of the primal-dual gap's dynamic term.
-    n_s_terminal = (solution.z[:, :, 0] * paths.d_w[:, :, 0]).sum(axis=1)
     diagnostics = {
         "ess_fraction": post.ess_fraction(),
         "max_weight_share": post.max_weight_share(),
         "y0": solution.y0,
         "y0_sample": solution.y0_sample,
-        "posterior_mean_semistatic_gain": float(post.weights() @ n_s_terminal),
+        "posterior_mean_semistatic_gain": -semistatic_defect,
         **{f"solver_{k}": float(v) for k, v in solution.residuals.items()},
     }
     bundle = CertificateBundle(

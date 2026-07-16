@@ -32,6 +32,18 @@ R2). New columns whose raw or residual variance falls below
 relative-interior guard) acts on new directions only; inherited
 directions can never be removed.
 
+**Triangular-scheme caveat (D11.8).** The variance gauge is sample
+selection: on a *fixed* pilot batch of N paths, columns far enough in
+the tails or narrow enough eventually all fall below ``var_floor``, so
+the ACTIVE family stabilizes in a finite space and is not convergence
+determining, even though the raw cumulative family is. What the code
+realizes at fixed N is therefore one row Psi_{n(N),N} of a triangular
+scheme; the theorem's full limit needs the double limit N -> infinity,
+n(N) -> infinity, var_floor_N -> 0 (or, equivalently, replacing hard
+rejection with a regularization that never permanently removes
+directions — the paper's Sobolev route, M2). Rejections being recorded
+per level is what makes the realized row of the scheme auditable.
+
 Unbounded raw calls remain deliberately excluded (§6.1): full call
 prices are recovered through the projective limit plus first-moment
 control.
