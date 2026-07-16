@@ -50,7 +50,23 @@ from otf.ssfv.bsde.regression import _hat_tensor_features, _log_mean_exp
 from otf.ssfv.projection.diffusion import DiffusionMartingaleProjector
 from otf.ssfv.types import BSDESolution, PathBatch
 
-__all__ = ["PicardHopfColeSolver", "PicardContext"]
+__all__ = ["PicardHopfColeSolver", "PicardContext", "TangentDiagnostics"]
+
+
+@dataclass(frozen=True)
+class TangentDiagnostics:
+    """Convergence certificate of the implicit-differentiation tangent
+    solve (review M2-3): the derivative is exact-on-sample only when the
+    linear iteration converged and no clip/cap active set is engaged —
+    the clipping bounds depend on lambda and are not differentiated."""
+
+    residual: float  # ||dZ - L(dZ) - b|| / (1 + ||dZ||)
+    iterations: int
+    converged: bool
+    clip_active_fraction: float
+    cap_active_fraction: float
+    certified: bool
+    reason: str  # empty when certified
 
 
 @dataclass(frozen=True)
@@ -384,7 +400,8 @@ class PicardHopfColeSolver:
 
     def dn_s_dlam(self, paths: PathBatch, potential, psi_dirs: np.ndarray,
                   context: PicardContext, solution: BSDESolution,
-                  n_iter: int = 12, tol: float = 1.0e-4) -> np.ndarray:
+                  n_iter: int = 40, tol: float = 1.0e-6,
+                  ) -> tuple[np.ndarray, "TangentDiagnostics"]:
         """Pathwise d N^S_T / d lambda_i by implicit differentiation of the
         Picard fixed point at the returned frozen-field solution.
 
@@ -402,7 +419,15 @@ class PicardHopfColeSolver:
         measure-zero kinks. Only the price-channel field is differentiated:
         kill and N^S involve Z^S alone.
 
-        Returns dNS with shape (n_paths, d): row p is d N^S_T(path p) / d lambda.
+        Returns ``(dNS, diagnostics)``: dNS with shape (n_paths, d) — row p
+        is d N^S_T(path p) / d lambda — and a :class:`TangentDiagnostics`
+        with the tangent's own convergence certificate. The derivative is
+        *certified* only when the linear iteration converged AND no clip
+        or score cap is active: the clipping bounds themselves depend on
+        lambda (h_cap = e^{||Phi||}, Z_cap = Z_cap(Lip Phi)) and the
+        tangent freezes the active set without differentiating the
+        bounds, so an active cap makes the derivative approximate — the
+        certificate says so instead of claiming exactness.
         """
         if self.score_from != "increments":
             raise NotImplementedError("implicit differentiation implemented "
@@ -472,16 +497,39 @@ class PicardHopfColeSolver:
 
         dzs = np.zeros((n_paths, n_steps, d))
         omega = self.picard_damping
+        converged = False
+        iterations = 0
         for it in range(n_iter):
+            iterations = it + 1
             dzs_new = tangent_sweep(dzs)
             delta = float(np.sqrt(np.mean((dzs_new - dzs) ** 2)))
             scale = float(np.sqrt(np.mean(dzs_new**2))) + 1e-300
             w_relax = 1.0 if it == 0 else omega
             dzs = (1.0 - w_relax) * dzs + w_relax * dzs_new
             if delta < tol * scale:
+                converged = True
                 break
 
-        return (dzs * dw_s[:, :, None]).sum(axis=1)
+        # Tangent fixed-point residual r_tan = ||dZ - L(dZ) - b|| / (1 + ||dZ||):
+        # one extra sweep evaluates L(dZ) + b at the returned tangent.
+        resid = tangent_sweep(dzs) - dzs
+        r_tan = float(np.sqrt(np.mean(resid**2)) / (1.0 + np.sqrt(np.mean(dzs**2))))
+        clip_frac = float(1.0 - clip_ok.mean())
+        cap_frac = float(1.0 - cap_ok.mean())
+        certified = converged and clip_frac == 0.0 and cap_frac == 0.0
+        reason = ""
+        if not converged:
+            reason = "tangent iteration not converged"
+        elif cap_frac > 0.0:
+            reason = "active_score_cap"
+        elif clip_frac > 0.0:
+            reason = "active_positivity_clip"
+        diag = TangentDiagnostics(
+            residual=r_tan, iterations=iterations, converged=converged,
+            clip_active_fraction=clip_frac, cap_active_fraction=cap_frac,
+            certified=certified, reason=reason,
+        )
+        return (dzs * dw_s[:, :, None]).sum(axis=1), diag
 
     def projector(self) -> DiffusionMartingaleProjector:
         return DiffusionMartingaleProjector()

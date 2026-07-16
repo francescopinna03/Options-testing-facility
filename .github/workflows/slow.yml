@@ -1,0 +1,32 @@
+name: slow
+
+# The SSFV_SLOW lane: refinement plateau (4 levels, Sobolev continuation),
+# extended FD validation of the implicit Jacobian, external-DGP N-scaling
+# and 4-level external sequence. Manual or weekly; emits the refinement
+# tables and certificate JSONs as build artifacts.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 4 * * 1"
+
+jobs:
+  ssfv-slow:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install -e ".[numerical,dev]"
+      - name: slow test lane
+        run: SSFV_SLOW=1 python -m pytest -q -k "four_level or residual_scales or fd_extended"
+      - name: refinement study artifacts
+        run: |
+          python -m otf.experiments.ssfv_synthetic --out runs/refinement \
+            --paths 8192 --steps 32 --levels 0 1 2 3 \
+            --sobolev-sigma2 1e-3 --dt-table 8 16 32 64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ssfv-refinement-tables
+          path: runs/refinement/

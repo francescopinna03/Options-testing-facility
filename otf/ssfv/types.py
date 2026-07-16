@@ -243,19 +243,32 @@ class BSDESolution:
 class DualFitResult:
     """Output of FiniteDualCalibrator.fit at one level (arch doc §3.4, §10).
 
-    ``gradient`` is the gradient of the (possibly Sobolev-regularized)
-    sample dual — the FOC residual the optimizer drives to zero;
+    Three gradient objects are kept distinct (review M2-1):
+    ``gradient`` = g_moment = a - m - sigma^2 S lambda (the optimized
+    moment-map FOC); ``hedge_gradient`` = g_hedge = E^w[d_lambda N^S_T]
+    (zero in continuous time, not identically on the sample; computed by
+    implicit differentiation); ``dual_gradient`` = g_moment + g_hedge —
+    the true gradient of the regularized sample dual.
     ``moment_residuals`` is always the *raw* a_n - m(lambda).
-    ``reduced_jacobian`` is dm/dlambda at the returned multipliers when
-    the backend provides it (implicit differentiation of the Picard
-    fixed point): the true reduced Jacobian, dynamic cancellation
-    included, feeding the §10.3 Schur/conditioning certificate.
+
+    ``dual_value`` is the UNREGULARIZED sample dual lambda^T a -
+    Y_0^sample (what the duality certificate needs);
+    ``dual_value_regularized`` subtracts the Sobolev penalty and is what
+    step acceptance monitored. For sigma^2 > 0 the fit is a *regularized
+    candidate*, not the theorem's I-projection:
+    ``is_unregularized_projection`` is True only when the returned
+    multipliers satisfy the sigma^2 = 0 FOC (directly or after the
+    continuation polish).
+
+    ``reduced_jacobian`` is dm/dlambda (structural identifiability);
+    ``regularized_jacobian`` is dm/dlambda + sigma^2 S (the operator the
+    optimizer actually used) — the two coincide at sigma^2 = 0.
     """
 
     level: int
     lam: Array  # (d_n,) multipliers in the normalized basis
-    dual_value: float
-    gradient: Array  # (d_n,) regularized-dual FOC residual
+    dual_value: float  # unregularized: lambda^T a - Y_0^sample
+    gradient: Array  # (d_n,) g_moment: regularized moment-map FOC residual
     gradient_norm: float
     moment_residuals: Array  # (d_n,) raw a_n - m(lambda)
     moment_residual_norm: float
@@ -264,6 +277,20 @@ class DualFitResult:
     status: str
     warm_started: bool
     reduced_jacobian: Array | None = None  # (d_n, d_n) dm/dlambda
+    regularized_jacobian: Array | None = None  # dm/dlambda + sigma^2 S
+    hedge_gradient: Array | None = None  # g_hedge = E^w[d_lambda N^S_T]
+    dual_gradient: Array | None = None  # g_dual = g_moment + g_hedge
+    dual_gradient_norm: float | None = None
+    dual_value_regularized: float | None = None
+    sobolev_sigma2: float = 0.0
+    sobolev_penalty: float = 0.0  # sigma^2/2 * lambda^T S lambda
+    sobolev_energy: float = 0.0  # lambda^T S lambda = ||Phi||_{H^1}^2
+    is_unregularized_projection: bool = False
+    implicit_derivative_certified: bool | None = None
+    tangent_residual: float | None = None
+    # sigma^2 continuation trace: ((sigma2, foc_norm, moment_residual_norm,
+    # dual_value_unregularized, converged), ...) per stage.
+    continuation: tuple | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -374,11 +401,28 @@ class ConditioningCertificate:
     eigen_max: float
     condition_number: float
     n_removed_directions: int
+    # Structural (Schur) block, from J = dm/dlambda (review M2-2): an
+    # authentic efficient-score Schur complement is symmetric, PSD and
+    # dominated by the raw static covariance — these are *checks*, not
+    # assumptions, on the numerical Jacobian:
+    #   symmetry_ratio = ||J - J^T||_F / max(||J||_F, eps)
+    #   sym_eigen_min/max: spectrum of (J + J^T)/2
+    #   static_domination_margin: lambda_min(Cov_static - sym(J)),
+    #     >= -eps required.
     reduced_sv_min: float | None = None
     reduced_sv_max: float | None = None
     identifiable_dim: int | None = None
     identifiable_residual_norm: float | None = None
     unidentifiable_residual_norm: float | None = None
+    symmetry_ratio: float | None = None
+    sym_eigen_min: float | None = None
+    sym_eigen_max: float | None = None
+    static_domination_margin: float | None = None
+    # Regularized-system block, from A = J + sigma^2 S — the operator the
+    # optimizer actually used; distinct from structural identifiability.
+    regularized_system_rank: int | None = None
+    regularized_identifiable_residual_norm: float | None = None
+    regularized_unidentifiable_residual_norm: float | None = None
 
 
 @dataclass(frozen=True)

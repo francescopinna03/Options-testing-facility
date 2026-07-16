@@ -75,6 +75,25 @@ class ReweightedPosterior:
         energy = 0.5 * (self.solution.z_orth**2).sum(axis=1) * dt
         return float(self._w @ energy)
 
+    def entropy_lr_ci(self, n_boot: int = 200, seed: int = 0,
+                      level: float = 0.95) -> tuple[float, float]:
+        """Monte Carlo confidence interval for H^LR by bootstrap over
+        paths (weights are pathwise, so no re-solve is needed): the
+        plateau evidence of the refinement table must carry error bars,
+        not bare point estimates (review M2-5)."""
+        rng = np.random.default_rng(seed)
+        n = self.paths.n_paths
+        logw = self.solution.log_density
+        hs = np.empty(n_boot)
+        for b in range(n_boot):
+            idx = rng.integers(0, n, n)
+            lw = logw[idx]
+            w = np.exp(lw - lw.max())
+            w /= w.sum()
+            hs[b] = float(w @ (np.log(np.maximum(w, 1e-300)) + np.log(n)))
+        lo, hi = np.quantile(hs, [(1 - level) / 2, 1 - (1 - level) / 2])
+        return float(lo), float(hi)
+
     # -- martingale certificate ----------------------------------------------------
 
     def forward_error(self) -> float:

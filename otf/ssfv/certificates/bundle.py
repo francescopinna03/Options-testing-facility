@@ -87,7 +87,7 @@ def build_certificate_bundle(
     batch, enabling the Cauchy certificate; None for the first level.
     ``identifiable_sv_floor`` is the absolute singular-value floor (in
     static-curvature units) below which reduced directions are declared
-    unidentifiable — pass the calibrator's ``jac_rcond`` so the
+    unidentifiable — pass the calibrator's ``identifiability_sv_floor`` so the
     certificate and the optimizer agree on the split.
     """
     post = ReweightedPosterior(paths, solution)
@@ -162,26 +162,52 @@ def build_certificate_bundle(
         )
 
     centered = psi_normalized - m
-    jac = centered.T @ (centered * w[:, None])
-    eig = np.linalg.eigvalsh(jac)
-    # True reduced (Schur) spectrum when the fit carries the
-    # implicit-differentiation Jacobian dm/dlambda: dynamic cancellation
-    # included, so near-zero singular values ARE the gamma -> 1
-    # replicable directions. The FOC residual is split on the same
-    # threshold the optimizer used.
+    static_cov = centered.T @ (centered * w[:, None])
+    eig = np.linalg.eigvalsh(static_cov)
+    r = np.asarray(fit.gradient, dtype=float)
+
+    def residual_split(mat: np.ndarray) -> tuple[int, float, float]:
+        u, s, _ = np.linalg.svd(mat)
+        keep = s > identifiable_sv_floor
+        r_id = u[:, keep] @ (u[:, keep].T @ r)
+        return (int(keep.sum()), float(np.linalg.norm(r_id)),
+                float(np.linalg.norm(r - r_id)))
+
+    # Structural (Schur) block from J = dm/dlambda: spectrum, residual
+    # split, and the checks an authentic efficient-score Schur complement
+    # must pass — symmetry, PSD of the symmetrized part, domination by
+    # the raw static covariance (review M2-2). A violation beyond noise
+    # means the numerical Jacobian is NOT yet a certified efficient
+    # covariance, whatever else it is useful for.
     red_kw: dict = {}
     if fit.reduced_jacobian is not None:
-        u, s, _ = np.linalg.svd(np.asarray(fit.reduced_jacobian))
-        keep = s > identifiable_sv_floor
-        r = np.asarray(fit.gradient, dtype=float)
-        r_id = u[:, keep] @ (u[:, keep].T @ r)
+        J = np.asarray(fit.reduced_jacobian)
+        s = np.linalg.svd(J, compute_uv=False)
+        rank, r_id_n, r_un_n = residual_split(J)
+        sym = 0.5 * (J + J.T)
+        sym_eig = np.linalg.eigvalsh(sym)
+        dom_eig = np.linalg.eigvalsh(static_cov - sym)
         red_kw = {
             "reduced_sv_min": float(s[-1]),
             "reduced_sv_max": float(s[0]),
-            "identifiable_dim": int(keep.sum()),
-            "identifiable_residual_norm": float(np.linalg.norm(r_id)),
-            "unidentifiable_residual_norm": float(np.linalg.norm(r - r_id)),
+            "identifiable_dim": rank,
+            "identifiable_residual_norm": r_id_n,
+            "unidentifiable_residual_norm": r_un_n,
+            "symmetry_ratio": float(np.linalg.norm(J - J.T) / max(np.linalg.norm(J), 1e-300)),
+            "sym_eigen_min": float(sym_eig[0]),
+            "sym_eigen_max": float(sym_eig[-1]),
+            "static_domination_margin": float(dom_eig[0]),
         }
+    # Regularized-system block from A = J + sigma^2 S: the operator the
+    # optimizer actually used — kept distinct from structural
+    # identifiability (the two coincide at sigma^2 = 0).
+    if fit.regularized_jacobian is not None:
+        a_rank, a_id, a_un = residual_split(np.asarray(fit.regularized_jacobian))
+        red_kw.update({
+            "regularized_system_rank": a_rank,
+            "regularized_identifiable_residual_norm": a_id,
+            "regularized_unidentifiable_residual_norm": a_un,
+        })
     conditioning = ConditioningCertificate(
         eigen_min=float(eig[0]),
         eigen_max=float(eig[-1]),
@@ -196,6 +222,20 @@ def build_certificate_bundle(
         "y0": solution.y0,
         "y0_sample": solution.y0_sample,
         "posterior_mean_semistatic_gain": -semistatic_defect,
+        # Dual oracle and Sobolev bookkeeping (review M2-1/4): the true
+        # sample-dual gradient norm (moment FOC + hedge term), whether
+        # the returned candidate satisfies the unregularized FOC, and
+        # the H^1 size of the potential per level (plateau evidence).
+        "dual_gradient_norm": float("nan") if fit.dual_gradient_norm is None
+        else fit.dual_gradient_norm,
+        "sobolev_sigma2": fit.sobolev_sigma2,
+        "sobolev_energy": fit.sobolev_energy,
+        "is_unregularized_projection": float(fit.is_unregularized_projection),
+        "implicit_derivative_certified": (
+            float("nan") if fit.implicit_derivative_certified is None
+            else float(fit.implicit_derivative_certified)),
+        "tangent_residual": (float("nan") if fit.tangent_residual is None
+                             else fit.tangent_residual),
         **{f"solver_{k}": float(v) for k, v in solution.residuals.items()},
     }
     bundle = CertificateBundle(

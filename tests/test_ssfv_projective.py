@@ -22,7 +22,7 @@ np = pytest.importorskip("numpy")
 from otf.ssfv.bsde.picard import PicardHopfColeSolver
 from otf.ssfv.constraints.hat_family import LambdaPotential, NestedHatFamily
 from otf.ssfv.dual.calibrator import ReducedMomentMapCalibrator
-from otf.ssfv.dual.projective_sequence import ProjectiveSequence
+from otf.ssfv.dual.projective_sequence import ProjectiveSequence, cauchy_matrix
 from otf.ssfv.posterior.reweight import ReweightedPosterior
 from otf.ssfv.prior.heston import HestonPrior
 
@@ -165,16 +165,36 @@ def test_four_level_refinement_plateau(setting):
     h = [r.bundle.entropy.h_lr for r in runs]
     h_star = post_star.entropy_lr()
     # Monotone up to MC noise, bounded by the DGP entropy, plateau after
-    # the DGP's own level.
+    # the DGP's own level — with bootstrap error bars, not bare points.
     for a, b in zip(h, h[1:]):
         assert b >= a - 1e-3
-    assert h[3] <= h_star + 5e-3
-    assert abs(h[3] - h[1]) < 5e-3  # plateau: levels 2,3 add nothing
+    lo3, hi3 = runs[3].posterior.entropy_lr_ci()
+    ci_half = 0.5 * (hi3 - lo3)
+    assert h[3] <= h_star + max(5e-3, 2 * ci_half)
+    assert abs(h[3] - h[1]) < max(5e-3, 2 * ci_half)  # plateau
+    # Continuation ran and the returned candidates satisfy the
+    # unregularized FOC (theorem-level projective certificates apply).
+    for r in runs:
+        assert r.fit.continuation is not None
+        assert r.fit.continuation[-1][0] == 0.0  # last stage is the polish
+        assert r.fit.is_unregularized_projection, r.fit.status
+        # H^1 size of the potential stays bounded along refinement.
+        assert r.fit.sobolev_energy < 10.0
     for r in runs[1:]:
         b = r.bundle.projective
         assert b.cauchy_slack is not None and b.cauchy_slack > -2e-3
         assert abs(b.cauchy_identity_residual) < 1e-9
         assert r.bundle.diagnostics["ess_fraction"] > 0.5
+    # Full pairwise Cauchy matrix (review M2-5): the Pythagorean chain
+    # holds for every pair n < N, not only consecutive levels.
+    for row in cauchy_matrix(runs):
+        assert row["slack"] > -2e-3, row
+    # Law convergence across levels: call prices approach the DGP's.
+    strikes = np.array([0.9, 1.0, 1.1])
+    calls_star = post_star.call_prices(strikes)
+    errs = [np.abs(r.posterior.call_prices(strikes) - calls_star).max() for r in runs]
+    assert errs[3] < 2e-3
+    assert errs[3] <= errs[0] + 5e-4  # refinement does not move the law away
 
 
 def test_certificate_bundle_serializes(setting):

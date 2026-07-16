@@ -1,56 +1,56 @@
 """Finite dual calibration via the reduced moment map (arch doc §10;
-DECISIONS.md D6 — primary algorithm of the projective core).
+DECISIONS.md D6, D12 — primary algorithm of the projective core).
 
-The calibrator solves the moment equations m(lambda) = a_n rather than
-running a certified ascent on the dual D_n(lambda) = lambda^T a_n -
-Y_0^sample(Phi_lambda) — hence the name ReducedMomentMapCalibrator. The
-two are consistent by a *structural* theorem, not by convention: the
-sample-dual gradient is
+The calibrator drives the (possibly Sobolev-regularized) moment-map FOC
 
-    dD_n/dlambda = a_n - E^w[Psi] + E^w[d_lambda N^S],
+    g_moment(lambda) = a_n - m(lambda) - sigma^2 S lambda -> 0,
 
-and d_lambda N^S is a stochastic integral against W^S. In the diffusion
-sector the Girsanov change of measure moves only W^perp (the projector is
-structural), so W^S remains a Q_lambda-Brownian motion and
-E^{Q_lambda}[d_lambda N^S] = 0 exactly in continuous time, O(1/sqrt(N))
-on the sample. A zero of the moment map is therefore a first-order
-condition of the sample dual up to Monte Carlo error; the certified-dual
-upgrade (implicit differentiation of the Picard fixed point) is M2 scope.
+which is *not* identical to the sample-dual gradient. Three objects are
+kept distinct (review M2-1):
+
+    g_moment = a - m - sigma^2 S lambda        (optimized root)
+    g_hedge  = E^w[d_lambda N^S_T]             (dynamic-offset term)
+    g_dual   = g_moment + g_hedge              (true gradient of the
+                                                regularized sample dual)
+
+g_hedge vanishes in continuous time (Girsanov moves only W^perp, so W^S
+stays a Q_lambda-Brownian motion) but not identically on the discrete
+sample; with implicit differentiation available it is computed, not
+assumed away, and both g_hedge and g_dual are reported in the fit.
 
 Two-stage realization:
 
-* **stage 1 — static exponential family.** With no dynamic offset the
-  sample dual g(lambda) = lambda^T a - log-mean-exp(lambda^T Psi) is
-  strictly concave with exact gradient and Hessian; Newton solves it to
-  machine precision. This is the marginal-only tilt: an excellent starting
-  point because the SSFV correction to the *marginals* beyond it is the
-  martingale projection.
+* **stage 1 — static exponential family**, restricted to the
+  identifiable subspace of the reduced Jacobian at the starting point:
+  the static problem sees near-replicable directions as fully
+  identifiable and would otherwise load them with 1/(1 - gamma)-
+  amplified multipliers — gauge at this level's resolution, poison as a
+  warm start for the next (D12.10). The whole static move is guarded by
+  an exact sup-norm trust region, ESS backtracking and dual ascent
+  against the starting point.
 
-* **stage 2 — Gauss-Newton on the true moment map.** The map
-  m(lambda) = E^{Q_lambda}[Psi] (weights exp(Phi_lambda - N^S(lambda)),
-  field refreshed by the Picard Hopf-Cole solver) is differentiated by
-  finite differences on the frozen paths (the solver is a deterministic,
-  smooth function of lambda). The Newton step uses a *pseudo-inverse* with
-  a relative singular-value cutoff. This is essential, not cosmetic: in
-  directions dynamically replicable by the martingale term, the hedge
-  N^S(lambda) cancels almost all of the static tilt's effect on the
-  moments — the reduced Jacobian (the Schur complement of §10.3) is
-  near-singular there, a naive static update overshoots by 1/(1 - gamma)
-  and diverges, and the pseudo-inverse instead takes the minimal-norm step
-  in the identifiable subspace.
+* **stage 2 — Levenberg-Marquardt on the regularized FOC**, with the
+  Jacobian from implicit differentiation of the Picard fixed point
+  (``dn_s_dlam``; FD retained as cross-check backend). Directions with
+  reduced singular value above the identifiability floor are damped;
+  directions below it receive *zero step* — moving there is a random
+  walk on field noise. A candidate is accepted only if the FOC residual
+  strictly decreases AND the ESS survives AND the regularized sample
+  dual does not decrease beyond ``dual_slack``. Convergence is asserted
+  on the identifiable subspace, with the unidentifiable remainder
+  reported, never chased (§10.3).
 
-Safeguards per step: an exact sup-norm trust region; a monotone line
-search — the step is accepted only if the moment residual ||a - m||
-strictly decreases; and ESS backtracking — for the mild deformations of
-interest the true log-weights have std about sqrt(2H), so an ESS collapse
-always signals field-estimation noise. Failing candidates are halved; if
-no acceptable step exists the fit stops and says so (§20: fail loudly);
-the certificates carry the residuals.
+Sobolev semantics (review M2-4): for sigma^2 > 0 the solution satisfies
+the regularized FOC, so it is a *regularized candidate*, not the
+I-projection of the theorem; use ``fit_continuation`` (sigma^2 ladder
+down to an unregularized polish) to obtain a candidate whose projective
+certificates apply at theorem level, flagged by
+``is_unregularized_projection``.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 import numpy as np
@@ -63,7 +63,9 @@ __all__ = ["ReducedMomentMapCalibrator"]
 
 @dataclass(frozen=True)
 class ReducedMomentMapCalibrator:
-    """FiniteDualCalibrator backend: static warm start + reduced Gauss-Newton."""
+    """FiniteDualCalibrator backend: identifiability-restricted static
+    Newton warm start + Levenberg-Marquardt on the regularized FOC with
+    implicit-differentiation Jacobians (see module docstring)."""
 
     family: NestedHatFamily
     solver: Any = None
@@ -101,7 +103,7 @@ class ReducedMomentMapCalibrator:
     # never chased. NOTE: absolute, not relative to the largest singular
     # value — one strongly hedged direction can have |dm/dlambda| >> 1
     # and a relative cutoff would silently discard everything else.
-    jac_rcond: float = 3.0e-2
+    identifiability_sv_floor: float = 3.0e-2
     lm_mu0: float = 1.0e-2  # initial Levenberg-Marquardt damping
     # Dual-ascent acceptance slack: a candidate must also not DECREASE
     # the (regularized) sample dual by more than this. FOC-residual
@@ -130,6 +132,7 @@ class ReducedMomentMapCalibrator:
         paths: PathBatch,
         warm_start: np.ndarray | None = None,
         context: Any = None,
+        sigma2_override: float | None = None,
     ) -> DualFitResult:
         if self.solver is None:
             raise ValueError("no BSDE solver configured")
@@ -144,8 +147,10 @@ class ReducedMomentMapCalibrator:
 
         psi_T = self.family.evaluate_normalized(level, paths.x[:, -1])  # (n_paths, d)
         n_paths = paths.n_paths
-        sigma2 = self.sobolev_sigma2
-        s_gram = self.family.sobolev_gram(level) if sigma2 > 0.0 else np.zeros((d, d))
+        sigma2 = self.sobolev_sigma2 if sigma2_override is None else sigma2_override
+        # Always computed: the H^1 energy of the returned potential is
+        # reported even for unregularized fits (plateau evidence, D12).
+        s_gram = self.family.sobolev_gram(level)
 
         def sup_phi(coeffs: np.ndarray) -> float:
             return LambdaPotential(self.family, level, coeffs).sup_norm_exact()
@@ -165,15 +170,16 @@ class ReducedMomentMapCalibrator:
             return (float(lam @ targets) - sol.y0_sample
                     - 0.5 * sigma2 * float(lam @ (s_gram @ lam)))
 
-        def implicit_jacobian(lam: np.ndarray, m: np.ndarray,
-                              sol: BSDESolution) -> np.ndarray:
-            """Exact-on-sample dm/dlambda at the current solution:
-            J[k,i] = Cov_w(psi_k, psi_i - dN^S_i)."""
+        def implicit_jacobian(lam: np.ndarray, m: np.ndarray, sol: BSDESolution):
+            """dm/dlambda at the current solution — J[k,i] = Cov_w(psi_k,
+            psi_i - dN^S_i) — plus the hedge gradient g_hedge =
+            E^w[d_lambda N^S] and the tangent's own certificate."""
             pot = LambdaPotential(self.family, level, lam)
-            dns = self.solver.dn_s_dlam(paths, pot, psi_T, context, sol)
+            dns, tdiag = self.solver.dn_s_dlam(paths, pot, psi_T, context, sol)
             dl = psi_T - dns
             wv = _softmax(psi_T @ lam - self._dynamic_offset(sol, paths))
-            return psi_T.T @ (dl * wv[:, None]) - np.outer(m, wv @ dl)
+            j = psi_T.T @ (dl * wv[:, None]) - np.outer(m, wv @ dl)
+            return j, wv @ dns, tdiag
 
         # Stage 1: exact static exponential-family fit (marginal-only tilt),
         # restricted to the identifiable subspace of the reduced Jacobian
@@ -205,9 +211,9 @@ class ReducedMomentMapCalibrator:
         if self.jacobian == "implicit":
             w_ref = _softmax(psi_T @ lam0 - n_s_ref)
             m_ref = w_ref @ psi_T
-            j0 = implicit_jacobian(lam0, m_ref, sol_ref)
+            j0, _, _ = implicit_jacobian(lam0, m_ref, sol_ref)
             _, s0, vt0 = np.linalg.svd(j0)
-            v_keep = vt0[s0 > self.jac_rcond].T
+            v_keep = vt0[s0 > self.identifiability_sv_floor].T
             ident_proj = v_keep @ v_keep.T
         lam = self._static_newton(lam0, targets, psi_T, n_s_ref,
                                   s_gram, sigma2, ident_proj)
@@ -242,10 +248,23 @@ class ReducedMomentMapCalibrator:
             """Residual norms on/off the identifiable subspace of the
             reduced Jacobian (singular values above the absolute floor)."""
             u, s, _ = np.linalg.svd(J)
-            keep = s > self.jac_rcond
+            keep = s > self.identifiability_sv_floor
             r_id = u[:, keep] @ (u[:, keep].T @ r)
             return (float(np.linalg.norm(r_id)),
                     float(np.linalg.norm(r - r_id)), int(keep.sum()))
+
+        def jacobian_at(lam, m, sol):
+            if self.jacobian == "implicit":
+                return implicit_jacobian(lam, m, sol)
+            # FD Jacobian dm/dlambda on frozen paths (deterministic solver).
+            J = np.empty((d, d))
+            for j in range(d):
+                e = np.zeros(d)
+                e[j] = 1.0
+                eps = self.fd_phi / max(sup_phi(e), 1e-12)
+                m_j, _, _ = moments_of(lam + eps * e)
+                J[:, j] = (m_j - m) / eps
+            return J, None, None
 
         grad = foc(lam, m)
         gnorm = float(np.linalg.norm(grad))
@@ -253,36 +272,38 @@ class ReducedMomentMapCalibrator:
         ident_note = ""
         n_outer = 0
         status = "stage-1 static fit sufficient" if converged else ""
-        J = None
+        J, hedge, tdiag = None, None, None
         mu = self.lm_mu0
         dual_cur = dual_value(lam, sol)
         while not converged and n_outer < self.max_outer:
             n_outer += 1
-            if self.jacobian == "implicit":
-                # Implicit differentiation of the Picard fixed point.
-                J = implicit_jacobian(lam, m, sol)
-            else:
-                # FD Jacobian dm/dlambda on frozen paths (deterministic solver).
-                J = np.empty((d, d))
-                for j in range(d):
-                    e = np.zeros(d)
-                    e[j] = 1.0
-                    eps = self.fd_phi / max(sup_phi(e), 1e-12)
-                    m_j, _, _ = moments_of(lam + eps * e)
-                    J[:, j] = (m_j - m) / eps
+            J, hedge, tdiag = jacobian_at(lam, m, sol)
+            # Convergence on the identifiable subspace, checked with the
+            # Jacobian at the CURRENT point (review M2-2: the previous
+            # code paired a fresh residual with the stale J of the point
+            # before the step): the remainder lives where the reduced
+            # Jacobian says this sample cannot distinguish laws — report
+            # it, never chase it (§10.3).
+            r_id, r_un, rank = ident_split(J, grad)
+            if r_id < self.moment_tolerance:
+                converged = True
+                ident_note = (f" in identifiable subspace (rank {rank}/{d}, "
+                              f"unidentifiable residual {r_un:.3e})")
+                break
             A = J + sigma2 * s_gram  # FOC Jacobian (up to sign)
             u_a, s_a, vt_a = np.linalg.svd(A)
-            keep_a = s_a > self.jac_rcond
+            keep_a = s_a > self.identifiability_sv_floor
             utr = u_a[:, keep_a].T @ grad
-            # LM inner loop restricted to the identifiable subspace: the
-            # step is damped where the reduced Jacobian is informative and
-            # *zero* along unidentifiable directions — moving there is a
-            # random walk on field noise and, left free, LM will follow a
-            # monotone FOC trail into a spurious large-entropy basin
-            # (observed at fine levels). A candidate is accepted only if
-            # the FOC residual strictly decreases AND the ESS survives;
-            # failures (including Picard fixed-point failures at the
-            # candidate) raise the damping and retry.
+            # LM inner loop on the well-posed part of the regularized
+            # system: directions with singular value above the floor are
+            # damped; directions below it receive ZERO step — moving
+            # there is a random walk on field noise and, left free, LM
+            # follows a monotone FOC trail into a spurious large-entropy
+            # basin (observed at fine levels). A candidate is accepted
+            # only if the FOC residual strictly decreases AND the ESS
+            # survives AND the regularized sample dual does not decrease
+            # beyond dual_slack; failures (including Picard fixed-point
+            # failures at the candidate) raise the damping and retry.
             accepted = False
             for _ in range(self.max_backtracks + 1):
                 step = vt_a[keep_a].T @ (s_a[keep_a] / (s_a[keep_a] ** 2 + mu) * utr)
@@ -316,32 +337,25 @@ class ReducedMomentMapCalibrator:
             if gnorm < self.moment_tolerance:
                 converged = True
                 break
-            # Convergence on the identifiable subspace: the remainder
-            # lives where the reduced Jacobian says this sample cannot
-            # distinguish laws — report it, never chase it (§10.3).
-            r_id, r_un, rank = ident_split(J, grad)
-            if r_id < self.moment_tolerance:
-                converged = True
-                ident_note = (f" in identifiable subspace (rank {rank}/{d}, "
-                              f"unidentifiable residual {r_un:.3e})")
-                break
         if not status:
             status = (f"levenberg-marquardt {'converged' if converged else 'stopped'}"
                       f"{ident_note} after {n_outer} outer iterations "
                       f"(foc residual {gnorm:.3e})")
 
-        # Reduced Jacobian at the returned multipliers, for the §10.3
-        # Schur/conditioning certificate. Refresh it at the final point
-        # (steps may have moved lambda since the last one was formed).
+        # Jacobian, hedge gradient and tangent certificate at the RETURNED
+        # multipliers (steps may have moved lambda since the last refresh).
         if self.jacobian == "implicit":
-            J = implicit_jacobian(lam, m, sol)
+            J, hedge, tdiag = implicit_jacobian(lam, m, sol)
 
         moment_res = targets - m
+        dual_unreg = float(lam @ targets) - sol.y0_sample
+        penalty = 0.5 * sigma2 * float(lam @ (s_gram @ lam))
+        g_dual = grad + hedge if hedge is not None else None
         return DualFitResult(
             level=level.n,
             lam=lam,
-            dual_value=float(lam @ targets) - sol.y0_sample,
-            gradient=grad,  # regularized-dual gradient (FOC residual)
+            dual_value=dual_unreg,
+            gradient=grad,  # g_moment: regularized moment-map FOC residual
             gradient_norm=gnorm,
             moment_residuals=moment_res,  # raw a - m, always reported
             moment_residual_norm=float(np.linalg.norm(moment_res)),
@@ -350,7 +364,66 @@ class ReducedMomentMapCalibrator:
             status=status,
             warm_started=warm_start is not None,
             reduced_jacobian=J,
+            regularized_jacobian=None if J is None else J + sigma2 * s_gram,
+            hedge_gradient=hedge,
+            dual_gradient=g_dual,
+            dual_gradient_norm=None if g_dual is None else float(np.linalg.norm(g_dual)),
+            dual_value_regularized=dual_unreg - penalty,
+            sobolev_sigma2=sigma2,
+            sobolev_penalty=penalty,
+            sobolev_energy=float(lam @ (s_gram @ lam)),
+            is_unregularized_projection=bool(converged and sigma2 == 0.0),
+            implicit_derivative_certified=None if tdiag is None else tdiag.certified,
+            tangent_residual=None if tdiag is None else tdiag.residual,
         )
+
+    def fit_continuation(
+        self,
+        level: ConstraintLevel,
+        targets: np.ndarray,
+        paths: PathBatch,
+        warm_start: np.ndarray | None = None,
+        context: Any = None,
+        n_stages: int = 3,
+        ladder_factor: float = 16.0,
+    ) -> DualFitResult:
+        """Sobolev continuation -> unregularized polish (review M2-4).
+
+        For sigma^2 > 0 a fit satisfies the *regularized* FOC and is not
+        the I-projection of the theorem — entropy monotonicity, the
+        Pythagorean inequality and the TV bound do not automatically
+        apply to it. This method solves at sigma_0^2, divides sigma^2 by
+        ``ladder_factor`` per stage (warm-starting each), then attempts a
+        final solve at sigma^2 = 0. Only a converged polish carries
+        ``is_unregularized_projection = True``; when the polish fails the
+        last regularized candidate is returned, labeled as such, with the
+        full continuation trace either way.
+        """
+        if context is None:
+            context = self.build_context(level, paths)
+        sigma0 = self.sobolev_sigma2
+        ladder = ([sigma0 / ladder_factor**k for k in range(max(n_stages, 1))]
+                  if sigma0 > 0.0 else [])
+        ladder.append(0.0)
+        trace: list[tuple] = []
+        fit: DualFitResult | None = None
+        warm = warm_start
+        for s2 in ladder:
+            cand = self.fit(level, targets, paths, warm_start=warm,
+                            context=context, sigma2_override=s2)
+            trace.append((s2, cand.gradient_norm, cand.moment_residual_norm,
+                          cand.dual_value, cand.converged))
+            if s2 == 0.0 and not cand.converged and fit is not None:
+                return replace(
+                    fit,
+                    continuation=tuple(trace),
+                    status=(fit.status + "; unregularized polish failed "
+                            f"({cand.status}) — regularized candidate, "
+                            "NOT the theorem's I-projection"),
+                )
+            fit = cand
+            warm = cand.lam
+        return replace(fit, continuation=tuple(trace))
 
     # -- blocks -------------------------------------------------------------------
 

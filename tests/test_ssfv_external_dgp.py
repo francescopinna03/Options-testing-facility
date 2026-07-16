@@ -126,6 +126,44 @@ def test_calibration_improves_on_the_prior_toward_the_dgp(external_m1):
 
 
 @pytest.mark.skipif(not os.environ.get("SSFV_SLOW"),
+                    reason="4-level external sequence (~15 min); set SSFV_SLOW=1")
+def test_external_four_level_sequence():
+    """Review M2-5: the refinement study on the INDEPENDENT Girsanov DGP
+    — no Picard in the data-generating path. Entropy stays below the
+    exact c^2 T/2 anchor at every level, the pairwise Cauchy slacks are
+    reported with the defect decomposition absorbing the
+    noise-floor-bound moment errors, and every stall is loud."""
+    from otf.ssfv.dual.projective_sequence import ProjectiveSequence, cauchy_matrix
+
+    paths_cal = PRIOR.simulate(8192, STEPS, T, seed=1729)
+    paths_tgt = PRIOR.simulate(32768, STEPS, T, seed=99991)
+    w_tgt = tilt_weights(paths_tgt, C)
+
+    solver = PicardHopfColeSolver().for_prior(PRIOR)
+    cal = ReducedMomentMapCalibrator(FAMILY, solver=solver,
+                                     moment_tolerance=5e-3, max_outer=12,
+                                     sobolev_sigma2=1e-3)
+
+    def targets_fn(level):
+        return w_tgt @ FAMILY.evaluate_normalized(level, paths_tgt.x[:, -1])
+
+    runs = ProjectiveSequence(cal).run(paths_cal, [0, 1, 2, 3],
+                                       targets_fn=targets_fn)
+    for r in runs:
+        # One-sided I-projection anchor, with bootstrap slack.
+        _, hi = r.posterior.entropy_lr_ci()
+        assert r.bundle.entropy.h_lr <= H_TRUE + 0.01
+        assert hi <= H_TRUE + 0.02
+        assert r.bundle.diagnostics["ess_fraction"] > 0.3
+        assert r.fit.status  # loud, always
+        assert np.isfinite(r.fit.moment_residual_norm)
+    # Pairwise Pythagorean chain; approximate fits get the wider slack
+    # their decomposed defects justify (certificates carry the split).
+    for row in cauchy_matrix(runs):
+        assert row["slack"] > -5e-3, row
+
+
+@pytest.mark.skipif(not os.environ.get("SSFV_SLOW"),
                     reason="N-scaling probe (~10 min); set SSFV_SLOW=1")
 def test_residual_scales_with_paths():
     """Field-noise hypothesis (D10.8): the external-DGP stall must shrink

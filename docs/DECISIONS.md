@@ -338,3 +338,49 @@ throughout. Findings are recorded as measurements.
     plateau (H = [0, 3e-4, 3e-4, 2.8e-3] against H* = 9.5e-4, sup|Phi|
     bounded); with sigma^2 = 0 it explodes. Sobolev belongs to the
     projective/refinement axis, not to the external-noise axis (D12.2).
+
+### D12 addenda II (2026-07-16, M2 review pass)
+
+11. **Dual oracle.** Three gradient objects are kept distinct in every
+    fit: g_moment = a − m − σ²Sλ (the optimized root), g_hedge =
+    E^w[∂λN^S_T] (zero in continuous time, computed on the sample by
+    implicit differentiation, never assumed away), g_dual = g_moment +
+    g_hedge (the true gradient of the regularized sample dual). The
+    label "gradient of the sample dual" is reserved for g_dual.
+12. **Tangent certificate.** `dn_s_dlam` returns TangentDiagnostics:
+    fixed-point residual r_tan = ||dZ − L(dZ) − b||/(1+||dZ||),
+    iterations, convergence, clip/cap active fractions, and a
+    `certified` flag that is False whenever an active set is engaged —
+    the clipping bounds depend on λ (h_cap = e^{||Φ||}, Z_cap from
+    Lip Φ) and the tangent freezes the set without differentiating the
+    bounds. FD validation extended: random directions, roughest and
+    tail-side columns, two FD steps, two levels, certificate as
+    precondition (SSFV_SLOW lane).
+13. **Stale-J convergence bug fixed.** The identifiable-subspace
+    convergence check paired a fresh residual with the Jacobian of the
+    previous iterate; the check now runs at the top of each outer
+    iteration with the Jacobian at the current point. Structural (J)
+    and regularized (A = J + σ²S) operators are reported separately in
+    the Schur certificate: structural identifiability of the law vs
+    well-posedness of the regularized system.
+14. **Schur checks, not assumptions.** The certificate now verifies
+    what an authentic efficient-score Schur complement must satisfy:
+    symmetry ratio ||J − Jᵀ||_F/||J||_F, spectrum of sym(J), and
+    static domination λ_min(Cov_static − sym(J)) ≥ −ε.
+15. **Regularized ≠ I-projection.** For σ² > 0 the fit satisfies the
+    regularized FOC only; entropy monotonicity, the Pythagorean
+    inequality and the TV bound do not automatically apply.
+    `fit_continuation` runs a σ² ladder down to an unregularized
+    polish; only a converged polish carries
+    `is_unregularized_projection = True`, and `ProjectiveSequence`
+    uses it whenever σ² > 0. DualFitResult separates
+    dual_value (unregularized) / dual_value_regularized /
+    sobolev_penalty / sobolev_energy, plus the continuation trace.
+16. **Plateau evidence hardened.** Bootstrap CIs for H_n
+    (`entropy_lr_ci`), the full pairwise Cauchy matrix
+    (`cauchy_matrix`), per-level H¹ energies, call-price convergence
+    across levels, and a 4-level sequence on the independent Girsanov
+    DGP join the SSFV_SLOW lane; the lane runs as a manual/weekly CI
+    workflow (`slow.yml`) that uploads the refinement tables and
+    certificate JSONs as artifacts. `jac_rcond` renamed
+    `identifiability_sv_floor`.
