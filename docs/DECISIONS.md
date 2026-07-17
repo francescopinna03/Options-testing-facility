@@ -247,3 +247,140 @@ implemented, tested, and documented at the point of use.
     Picard context); DGP, prior and fitted calls are expectations on the
     same holdout sample. The reported law is out of sample with respect
     to the solver's regression error, not only the moment noise.
+
+## D12 — M2 numerical realization (added 2026-07-16)
+
+Order followed: Sobolev regularization, then implicit differentiation
+*before* the definitive Schur certificate (the implicit-diff Jacobian is
+the clean way to compute the true reduced Jacobian), refinement tables
+throughout. Findings are recorded as measurements.
+
+1. **Sobolev geometry.** `NestedHatFamily.sobolev_gram(level)` is the
+   exact H^1 Gram of the normalized columns, S = I + W^T D_raw W: L^2
+   block under the prior-pilot measure (identity, by orthonormality),
+   derivative block under Lebesgue (exact — derivatives are piecewise
+   constant on the knot union; ramps saturate, so S is finite despite
+   the tail tests not being L^2(dk)). The calibrator solves the
+   regularized FOC a − m(λ) − σ²Sλ = 0; σ² = 0 reproduces M1 exactly.
+   The raw moment residual stays reported; the duality-defect
+   decomposition (D11.9) quantifies what regularization gave up.
+2. **Measured: Sobolev does not cure the external-DGP stall at M1 path
+   counts.** A σ² grid on the Girsanov DGP at 8k paths shrinks H toward
+   0 and worsens holdout error monotonically: the stall is not
+   multiplier runaway (which Sobolev bounds) but a *target-attainability
+   floor* — targets from an independent batch differ from anything the
+   calibration batch can represent by O(sqrt(d/N)) ≈ 3e-2 at 8k, and
+   the fit stalls there. The refinement axis for external accuracy is
+   N (measured in D11.7), not σ².
+3. **Implicit differentiation of the Picard fixed point**
+   (`PicardHopfColeSolver.dn_s_dlam`). The tangent of the frozen-field
+   solution solves the linear equation dZ = L dZ + b (b = terminal
+   perturbation through the killed-FK pass, L = the killing-weight
+   coupling d kill = −dt·Z̄·dZ·kill); it is solved by the same damped
+   iteration as the field, with regression operators fixed (they are
+   linear maps cached in the context) and clip/cap active sets frozen at
+   the solution. Exact on the sample modulo those measure-zero kinks:
+   validated against central finite differences (5e-2 max-relative,
+   exact where the caps are quiet), 13× faster than the FD Jacobian,
+   one tangent solve for all directions. Default Jacobian backend; FD
+   retained as cross-check.
+4. **Relative pseudo-inverse cutoff was a bug in disguise.** The reduced
+   Jacobian can have one strongly hedged direction with |dm/dλ| ≫ 1
+   (measured: singular value 21 against a mid-block of 0.1–0.5); a
+   cutoff *relative to the largest singular value* then silently
+   discards every other direction and Gauss-Newton degenerates to rank
+   one — the actual mechanism behind part of the external stall.
+   `jac_rcond` is now an *absolute* floor in static-curvature units
+   (the basis is orthonormal on the pilot sample, so singular values of
+   dm/dλ measure directly what survives dynamic cancellation).
+5. **Levenberg-Marquardt replaces truncated-pinv Gauss-Newton.** Weakly
+   identifiable directions are damped, not cut; the damping adapts to
+   the strong nonlinearity (overshoot 1/(1−γ)) along them. Acceptance
+   still requires strict FOC-residual decrease AND ESS survival.
+6. **Convergence is asserted on the identifiable subspace.** Directions
+   with reduced singular value below the floor are declared
+   unidentifiable at this sample size; the FOC residual is split and
+   both parts are reported (status string + Schur certificate). Chasing
+   the unidentifiable part is exactly the field-noise chase of D10.8.
+7. **Schur certificate** (`ConditioningCertificate` extension): reduced
+   singular range, identifiable dimension, and the identifiable/
+   unidentifiable FOC-residual split, computed from the implicit-diff
+   Jacobian carried by `DualFitResult.reduced_jacobian`, with the same
+   floor the optimizer used (threaded by `ProjectiveSequence`).
+
+### D12 addenda (refinement-cascade findings)
+
+8. **Picard iteration ceiling is not a cost.** The loop early-stops on
+   `picard_tol`, so converged solves never see the ceiling; fine
+   constraint levels (sharper terminal kinks) genuinely need tens of
+   damped iterations. Ceiling raised 12 → 60; a low ceiling turned fine
+   levels into fixed-point failures.
+9. **Dual-ascent acceptance (completing the first review's
+   prescription).** LM candidates must also not decrease the
+   (regularized) sample dual: at large deformations the noisy fields
+   underestimate Y_0^sample, the sample dual is overestimated far from
+   the origin, and a monotone-FOC trail can walk into a spurious
+   large-entropy basin. Stage 1's total move is backtracked under the
+   same dual condition against the starting point.
+10. **Gauge is resolution-dependent — the mechanism of the refinement
+    cascade.** A calibrated level can carry a potential component of
+    high amplitude on rough/rare-support columns that its own
+    resolution hedges almost exactly (law unchanged, H tiny) but the
+    finer level does not (measured: the same function solved with the
+    finer context jumps from H ~ 2e-4 to H ~ 0.13; warm-started
+    cascades reach H ~ 1.9 against H* ~ 1e-3). Two structural cures,
+    both applied: the static stage is restricted to the identifiable
+    subspace of the reduced Jacobian at its starting point (never load
+    directions the dynamics cancel), and — decisively — **Sobolev
+    regularization, whose measured M2 role is exactly this**: making
+    the potential representative well-posed across refinement levels.
+    With sigma^2 = 3e-4..1e-3 the 4-level study gives a clean entropy
+    plateau (H = [0, 3e-4, 3e-4, 2.8e-3] against H* = 9.5e-4, sup|Phi|
+    bounded); with sigma^2 = 0 it explodes. Sobolev belongs to the
+    projective/refinement axis, not to the external-noise axis (D12.2).
+
+### D12 addenda II (2026-07-16, M2 review pass)
+
+11. **Dual oracle.** Three gradient objects are kept distinct in every
+    fit: g_moment = a − m − σ²Sλ (the optimized root), g_hedge =
+    E^w[∂λN^S_T] (zero in continuous time, computed on the sample by
+    implicit differentiation, never assumed away), g_dual = g_moment +
+    g_hedge (the true gradient of the regularized sample dual). The
+    label "gradient of the sample dual" is reserved for g_dual.
+12. **Tangent certificate.** `dn_s_dlam` returns TangentDiagnostics:
+    fixed-point residual r_tan = ||dZ − L(dZ) − b||/(1+||dZ||),
+    iterations, convergence, clip/cap active fractions, and a
+    `certified` flag that is False whenever an active set is engaged —
+    the clipping bounds depend on λ (h_cap = e^{||Φ||}, Z_cap from
+    Lip Φ) and the tangent freezes the set without differentiating the
+    bounds. FD validation extended: random directions, roughest and
+    tail-side columns, two FD steps, two levels, certificate as
+    precondition (SSFV_SLOW lane).
+13. **Stale-J convergence bug fixed.** The identifiable-subspace
+    convergence check paired a fresh residual with the Jacobian of the
+    previous iterate; the check now runs at the top of each outer
+    iteration with the Jacobian at the current point. Structural (J)
+    and regularized (A = J + σ²S) operators are reported separately in
+    the Schur certificate: structural identifiability of the law vs
+    well-posedness of the regularized system.
+14. **Schur checks, not assumptions.** The certificate now verifies
+    what an authentic efficient-score Schur complement must satisfy:
+    symmetry ratio ||J − Jᵀ||_F/||J||_F, spectrum of sym(J), and
+    static domination λ_min(Cov_static − sym(J)) ≥ −ε.
+15. **Regularized ≠ I-projection.** For σ² > 0 the fit satisfies the
+    regularized FOC only; entropy monotonicity, the Pythagorean
+    inequality and the TV bound do not automatically apply.
+    `fit_continuation` runs a σ² ladder down to an unregularized
+    polish; only a converged polish carries
+    `is_unregularized_projection = True`, and `ProjectiveSequence`
+    uses it whenever σ² > 0. DualFitResult separates
+    dual_value (unregularized) / dual_value_regularized /
+    sobolev_penalty / sobolev_energy, plus the continuation trace.
+16. **Plateau evidence hardened.** Bootstrap CIs for H_n
+    (`entropy_lr_ci`), the full pairwise Cauchy matrix
+    (`cauchy_matrix`), per-level H¹ energies, call-price convergence
+    across levels, and a 4-level sequence on the independent Girsanov
+    DGP join the SSFV_SLOW lane; the lane runs as a manual/weekly CI
+    workflow (`slow.yml`) that uploads the refinement tables and
+    certificate JSONs as artifacts. `jac_rcond` renamed
+    `identifiability_sv_floor`.

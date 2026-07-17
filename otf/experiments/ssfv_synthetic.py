@@ -26,7 +26,7 @@ from otf.ssfv.bsde.picard import PicardHopfColeSolver
 from otf.ssfv.config import ExperimentConfig, PriorConfig, SimulationConfig, derive_seed
 from otf.ssfv.constraints.hat_family import LambdaPotential, NestedHatFamily
 from otf.ssfv.dual.calibrator import ReducedMomentMapCalibrator
-from otf.ssfv.dual.projective_sequence import ProjectiveSequence
+from otf.ssfv.dual.projective_sequence import ProjectiveSequence, cauchy_matrix
 from otf.ssfv.posterior.reweight import ReweightedPosterior
 from otf.ssfv.prior.heston import HestonPrior
 
@@ -44,6 +44,11 @@ def main(argv=None) -> int:
                     metavar="STEPS",
                     help="also emit dt_convergence_table.json across these "
                          "step counts (same horizon, same DGP potential)")
+    ap.add_argument("--sobolev-sigma2", type=float, default=0.0,
+                    help="Sobolev regularization strength sigma^2 (M2, D12)")
+    ap.add_argument("--jacobian", choices=["implicit", "fd"], default="implicit",
+                    help="stage-2 Jacobian backend (implicit fixed-point "
+                         "differentiation, or finite differences)")
     args = ap.parse_args(argv)
 
     out = pathlib.Path(args.out)
@@ -60,7 +65,9 @@ def main(argv=None) -> int:
 
     family = NestedHatFamily(k_min=-0.5, k_max=0.5, base_dim=4)
     solver = PicardHopfColeSolver().for_prior(prior)
-    cal = ReducedMomentMapCalibrator(family, solver=solver)
+    cal = ReducedMomentMapCalibrator(family, solver=solver,
+                                     sobolev_sigma2=args.sobolev_sigma2,
+                                     jacobian=args.jacobian)
 
     # DGP 2: known potential at the finest requested level, rescaled so
     # sup|Phi*| equals --potential-scale exactly.
@@ -98,10 +105,15 @@ def main(argv=None) -> int:
     table = []
     for r in runs:
         (out / f"certificates_level_{r.bundle.level}.json").write_text(r.bundle.to_json())
+        h_lo, h_hi = r.posterior.entropy_lr_ci()
         table.append({
             "level": r.bundle.level,
             "dim": r.level.dim,
             "converged": r.fit.converged,
+            "is_unregularized_projection": r.fit.is_unregularized_projection,
+            "sobolev_energy": r.fit.sobolev_energy,
+            "continuation": r.fit.continuation,
+            "H_lr_ci": [h_lo, h_hi],
             "moment_residual": r.fit.moment_residual_norm,
             "H_lr": r.bundle.entropy.h_lr,
             "H_en": r.bundle.entropy.h_en,
@@ -115,6 +127,7 @@ def main(argv=None) -> int:
             "ess_fraction": r.bundle.diagnostics["ess_fraction"],
         })
     (out / "refinement_table.json").write_text(json.dumps(table, indent=2))
+    (out / "cauchy_matrix.json").write_text(json.dumps(cauchy_matrix(runs), indent=2))
 
     for row in table:
         print(" ".join(f"{k}={v}" for k, v in row.items()))

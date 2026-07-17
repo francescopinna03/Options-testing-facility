@@ -241,19 +241,56 @@ class BSDESolution:
 
 @dataclass(frozen=True)
 class DualFitResult:
-    """Output of FiniteDualCalibrator.fit at one level (arch doc §3.4, §10)."""
+    """Output of FiniteDualCalibrator.fit at one level (arch doc §3.4, §10).
+
+    Three gradient objects are kept distinct (review M2-1):
+    ``gradient`` = g_moment = a - m - sigma^2 S lambda (the optimized
+    moment-map FOC); ``hedge_gradient`` = g_hedge = E^w[d_lambda N^S_T]
+    (zero in continuous time, not identically on the sample; computed by
+    implicit differentiation); ``dual_gradient`` = g_moment + g_hedge —
+    the true gradient of the regularized sample dual.
+    ``moment_residuals`` is always the *raw* a_n - m(lambda).
+
+    ``dual_value`` is the UNREGULARIZED sample dual lambda^T a -
+    Y_0^sample (what the duality certificate needs);
+    ``dual_value_regularized`` subtracts the Sobolev penalty and is what
+    step acceptance monitored. For sigma^2 > 0 the fit is a *regularized
+    candidate*, not the theorem's I-projection:
+    ``is_unregularized_projection`` is True only when the returned
+    multipliers satisfy the sigma^2 = 0 FOC (directly or after the
+    continuation polish).
+
+    ``reduced_jacobian`` is dm/dlambda (structural identifiability);
+    ``regularized_jacobian`` is dm/dlambda + sigma^2 S (the operator the
+    optimizer actually used) — the two coincide at sigma^2 = 0.
+    """
 
     level: int
     lam: Array  # (d_n,) multipliers in the normalized basis
-    dual_value: float
-    gradient: Array  # (d_n,) = a_n - E^{Q_n}[Psi_n]
+    dual_value: float  # unregularized: lambda^T a - Y_0^sample
+    gradient: Array  # (d_n,) g_moment: regularized moment-map FOC residual
     gradient_norm: float
-    moment_residuals: Array  # (d_n,)
+    moment_residuals: Array  # (d_n,) raw a_n - m(lambda)
     moment_residual_norm: float
     n_iterations: int
     converged: bool
     status: str
     warm_started: bool
+    reduced_jacobian: Array | None = None  # (d_n, d_n) dm/dlambda
+    regularized_jacobian: Array | None = None  # dm/dlambda + sigma^2 S
+    hedge_gradient: Array | None = None  # g_hedge = E^w[d_lambda N^S_T]
+    dual_gradient: Array | None = None  # g_dual = g_moment + g_hedge
+    dual_gradient_norm: float | None = None
+    dual_value_regularized: float | None = None
+    sobolev_sigma2: float = 0.0
+    sobolev_penalty: float = 0.0  # sigma^2/2 * lambda^T S lambda
+    sobolev_energy: float = 0.0  # lambda^T S lambda = ||Phi||_{H^1}^2
+    is_unregularized_projection: bool = False
+    implicit_derivative_certified: bool | None = None
+    tangent_residual: float | None = None
+    # sigma^2 continuation trace: ((sigma2, foc_norm, moment_residual_norm,
+    # dual_value_unregularized, converged), ...) per stage.
+    continuation: tuple | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -345,12 +382,47 @@ class ProjectiveCertificate:
 
 @dataclass(frozen=True)
 class ConditioningCertificate:
-    """§10.3 reduced-Jacobian conditioning (diagnostic, not existence test)."""
+    """§10.3 conditioning: static covariance spectrum plus, when the
+    calibrator provides the implicit-differentiation Jacobian, the *true
+    reduced* (Schur) spectrum.
+
+    The normalized basis is orthonormal on the pilot sample, so the
+    static curvature is the identity and the singular values of
+    dm/dlambda are directly the fraction of a unit static response that
+    survives dynamic cancellation by the semistatic hedge (gamma -> 1
+    directions have singular values -> 0). ``identifiable_dim`` counts
+    singular values above the absolute floor; the FOC residual is split
+    into its identifiable and unidentifiable parts — the latter is what
+    this sample size cannot distinguish and must be reported, never
+    chased.
+    """
 
     eigen_min: float
     eigen_max: float
     condition_number: float
     n_removed_directions: int
+    # Structural (Schur) block, from J = dm/dlambda (review M2-2): an
+    # authentic efficient-score Schur complement is symmetric, PSD and
+    # dominated by the raw static covariance — these are *checks*, not
+    # assumptions, on the numerical Jacobian:
+    #   symmetry_ratio = ||J - J^T||_F / max(||J||_F, eps)
+    #   sym_eigen_min/max: spectrum of (J + J^T)/2
+    #   static_domination_margin: lambda_min(Cov_static - sym(J)),
+    #     >= -eps required.
+    reduced_sv_min: float | None = None
+    reduced_sv_max: float | None = None
+    identifiable_dim: int | None = None
+    identifiable_residual_norm: float | None = None
+    unidentifiable_residual_norm: float | None = None
+    symmetry_ratio: float | None = None
+    sym_eigen_min: float | None = None
+    sym_eigen_max: float | None = None
+    static_domination_margin: float | None = None
+    # Regularized-system block, from A = J + sigma^2 S — the operator the
+    # optimizer actually used; distinct from structural identifiability.
+    regularized_system_rank: int | None = None
+    regularized_identifiable_residual_norm: float | None = None
+    regularized_unidentifiable_residual_norm: float | None = None
 
 
 @dataclass(frozen=True)

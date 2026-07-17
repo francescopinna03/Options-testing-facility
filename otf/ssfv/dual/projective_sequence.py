@@ -25,7 +25,23 @@ from otf.ssfv.dual.calibrator import ReducedMomentMapCalibrator
 from otf.ssfv.posterior.reweight import ReweightedPosterior
 from otf.ssfv.types import CertificateBundle, ConstraintLevel, DualFitResult, PathBatch
 
-__all__ = ["ProjectiveSequence", "LevelRun"]
+__all__ = ["ProjectiveSequence", "LevelRun", "cauchy_matrix"]
+
+
+def cauchy_matrix(runs: Sequence["LevelRun"]) -> list[dict]:
+    """Signed Cauchy slack for EVERY pair n < N (review M2-5), not only
+    consecutive levels: the Pythagorean chain must hold pairwise on the
+    common path batch. Rows: {n, N, delta_h, kl, slack}."""
+    from otf.ssfv.certificates.bundle import direct_kl
+
+    out: list[dict] = []
+    for i, rn in enumerate(runs):
+        for rj in runs[i + 1:]:
+            dh = rj.bundle.entropy.h_lr - rn.bundle.entropy.h_lr
+            kl = direct_kl(rj.posterior, rn.posterior)
+            out.append({"n": rn.level.n, "N": rj.level.n,
+                        "delta_h": dh, "kl": kl, "slack": dh - kl})
+    return out
 
 
 @dataclass(frozen=True)
@@ -77,12 +93,21 @@ class ProjectiveSequence:
                 warm = family.embed(prev_lam, prev_level, level)
 
             context = self.calibrator.build_context(level, paths)
-            fit = self.calibrator.fit(level, targets, paths,
-                                      warm_start=warm, context=context)
+            if self.calibrator.sobolev_sigma2 > 0.0:
+                # Sobolev continuation with unregularized polish: only the
+                # polished candidate is the theorem's I-projection; a
+                # failed polish is returned labeled (review M2-4).
+                fit = self.calibrator.fit_continuation(level, targets, paths,
+                                                       warm_start=warm, context=context)
+            else:
+                fit = self.calibrator.fit(level, targets, paths,
+                                          warm_start=warm, context=context)
             sol = self.calibrator.solve_at(level, fit.lam, paths, context)
             psi = family.evaluate_normalized(level, paths.x[:, -1])
-            bundle, post = build_certificate_bundle(paths, sol, fit, psi, targets,
-                                                    previous=prev_cert)
+            bundle, post = build_certificate_bundle(
+                paths, sol, fit, psi, targets, previous=prev_cert,
+                identifiable_sv_floor=self.calibrator.identifiability_sv_floor,
+            )
 
             runs.append(LevelRun(level=level, fit=fit, bundle=bundle, posterior=post))
             prev_level, prev_lam = level, fit.lam

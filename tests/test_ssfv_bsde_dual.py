@@ -11,6 +11,8 @@ field, not merely the coefficient vector"), so recovery is asserted on the
 law — call prices, entropy, moments — not on the raw lambda vector.
 """
 
+import os
+
 import pytest
 
 pytest.importorskip("scipy")
@@ -139,6 +141,111 @@ def test_dual_calibration_recovers_the_law(paths, level, solver, context, lam_st
     assert post_hat.ess_fraction() > 0.9
     assert post_hat.forward_error() < 5e-3
     assert abs(post_hat.entropy_lr() - post_star.entropy_lr()) < 2e-3
+
+
+def test_implicit_jacobian_matches_finite_differences(paths, level, solver, context, lam_star, star):
+    """M2: dm/dlambda by implicit differentiation of the Picard fixed
+    point vs central finite differences. Agreement is asserted on
+    columns where the clip/cap active sets are quiet (the tangent
+    freezes them; FD steps across them)."""
+    sol, _ = star
+    psi_T = FAMILY.evaluate_normalized(level, paths.x[:, -1])
+    pot = LambdaPotential(FAMILY, level, lam_star)
+    dns, tdiag = solver.dn_s_dlam(paths, pot, psi_T, context, sol)
+    # Tangent certificate (review M2-3): converged linear iteration and a
+    # quiet active set are what make the FD comparison below meaningful.
+    assert tdiag.converged and tdiag.residual < 1e-5
+    assert tdiag.cap_active_fraction < 1e-3
+    assert tdiag.clip_active_fraction < 1e-3
+    dl = psi_T - dns
+    ns0 = (sol.z[:, :, 0] * paths.d_w[:, :, 0]).sum(axis=1)
+    e = psi_T @ lam_star - ns0
+    w = np.exp(e - e.max())
+    w /= w.sum()
+    m0 = w @ psi_T
+    j_imp = psi_T.T @ (dl * w[:, None]) - np.outer(m0, w @ dl)
+
+    def moments(lam):
+        s = solver.solve(paths, LambdaPotential(FAMILY, level, lam), context)
+        ns = (s.z[:, :, 0] * paths.d_w[:, :, 0]).sum(axis=1)
+        le = psi_T @ lam - ns
+        wv = np.exp(le - le.max())
+        wv /= wv.sum()
+        return wv @ psi_T
+
+    eps = 1e-3
+    for j in (2, 3):
+        ej = np.zeros(level.dim)
+        ej[j] = eps
+        col_fd = (moments(lam_star + ej) - moments(lam_star - ej)) / (2 * eps)
+        rel = np.abs(j_imp[:, j] - col_fd).max() / max(np.abs(col_fd).max(), 1e-12)
+        assert rel < 5e-2, f"column {j}: rel error {rel:.2e}"
+
+
+@pytest.mark.skipif(not os.environ.get("SSFV_SLOW"),
+                    reason="extended FD validation (~3 min); set SSFV_SLOW=1")
+def test_implicit_jacobian_fd_extended(paths, solver):
+    """Review M2-3: FD validation beyond two quiet columns — random
+    directions, the roughest (max Sobolev diagonal) and the last-created
+    (tail-side) direction, two FD steps, two levels, with an explicit
+    tangent certificate (converged, quiet clip/cap sets) as the
+    precondition for demanding tight agreement."""
+    rng = np.random.default_rng(11)
+    for n in (0, 1):
+        level = FAMILY.normalize(FAMILY.level(n), paths.x[:, -1])
+        psi_T = FAMILY.evaluate_normalized(level, paths.x[:, -1])
+        d = level.dim
+        lam = rng.normal(0.0, 1.0, d)
+        lam *= 0.3 / LambdaPotential(FAMILY, level, lam).sup_norm_exact()
+        ctx = solver.build_context(paths, extra_knots=level.knots)
+        pot = LambdaPotential(FAMILY, level, lam)
+        sol = solver.solve(paths, pot, ctx)
+        dns, tdiag = solver.dn_s_dlam(paths, pot, psi_T, ctx, sol)
+        assert tdiag.converged
+        assert tdiag.certified, tdiag.reason  # quiet clip/cap sets required
+        dl = psi_T - dns
+        ns0 = (sol.z[:, :, 0] * paths.d_w[:, :, 0]).sum(axis=1)
+        e = psi_T @ lam - ns0
+        w = np.exp(e - e.max())
+        w /= w.sum()
+        m0 = w @ psi_T
+        j_imp = psi_T.T @ (dl * w[:, None]) - np.outer(m0, w @ dl)
+
+        def moments(la):
+            s = solver.solve(paths, LambdaPotential(FAMILY, level, la), ctx)
+            ns = (s.z[:, :, 0] * paths.d_w[:, :, 0]).sum(axis=1)
+            le = psi_T @ la - ns
+            wv = np.exp(le - le.max())
+            wv /= wv.sum()
+            return wv @ psi_T
+
+        s_diag = np.diag(FAMILY.sobolev_gram(level))
+        dirs = [np.eye(d)[int(np.argmax(s_diag))],  # roughest column
+                np.eye(d)[d - 1]]                   # last-created (tail side)
+        for _ in range(2):
+            v = rng.normal(size=d)
+            dirs.append(v / np.linalg.norm(v))
+        for v in dirs:
+            jv = j_imp @ v
+            for eps in (3e-4, 1e-3):
+                fd = (moments(lam + eps * v) - moments(lam - eps * v)) / (2 * eps)
+                rel = np.abs(jv - fd).max() / max(np.abs(fd).max(), 1e-12)
+                assert rel < 5e-2, f"level {n}, eps {eps}: rel {rel:.2e}"
+
+
+def test_sobolev_gram_and_null_targets(paths, level, solver, context):
+    """M2: the Sobolev Gram is symmetric positive definite with unit L2
+    block, and a regularized fit on null targets still returns the prior
+    (the penalty vanishes at lambda = 0, so exactness survives)."""
+    S = FAMILY.sobolev_gram(level)
+    np.testing.assert_allclose(S, S.T, atol=1e-10)
+    assert np.linalg.eigvalsh(S)[0] >= 1.0 - 1e-8  # I + PSD derivative part
+    psi = FAMILY.evaluate_normalized(level, paths.x[:, -1])
+    targets = psi.mean(axis=0)
+    cal = ReducedMomentMapCalibrator(FAMILY, solver=solver, sobolev_sigma2=1e-3)
+    fit = cal.fit(level, targets, paths, context=context)
+    assert fit.converged
+    assert float(np.abs(fit.lam).max()) < 1e-3
 
 
 def test_dt_refinement_no_first_order_bias_visible(level, solver, lam_star):
